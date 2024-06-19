@@ -29,3 +29,37 @@ block:block_rq_issue：块设备请求发起事件。
 自定义事件（Custom Events）：
 
 用户可以通过 perf_event_open 系统调用定义自定义事件。
+
+```c
+//对于perf_event_open系统调用的包装, libc里面不提供, 要自己定义
+static int perf_event_open(struct perf_event_attr *evt_attr, pid_t pid, int cpu, int group_fd, unsigned long flags)
+{
+    int ret;
+    ret = syscall(__NR_perf_event_open, evt_attr, pid, cpu, group_fd, flags);
+    return ret;
+}
+```
+*struct perf_event_attr evt_attr:
+
+指向 perf_event_attr 结构体的指针。这个结构体定义了性能事件的配置，包括事件类型、采样频率、排除选项等。
+pid_t pid:
+
+进程ID，用于指定要监控的进程。
+如果 pid 为 0，则监控当前进程。
+如果 pid 为正数，则监控指定的进程。
+如果 pid 为 -1，则在系统范围内监控（与 cpu 结合使用）。
+如果 pid 为 -2，则监控当前线程的所有线程组成员。
+int cpu:
+
+指定要监控的CPU。
+如果 cpu 为 -1，则监控所有CPU。
+如果 cpu 为正数，则监控指定的CPU。
+int group_fd:
+
+用于事件分组的文件描述符。
+如果 group_fd 为 -1，则事件不属于任何组。
+如果 group_fd 为正数，则事件属于由该文件描述符表示的事件组。
+unsigned long flags:
+
+标志位，用于进一步配置事件的行为。
+常见的标志包括 PERF_FLAG_FD_CLOEXEC（在 execve 后自动关闭文件描述符）等。
