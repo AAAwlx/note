@@ -22,6 +22,14 @@ import (
 go mod init myproject//项目名
 ```
 
+获取需要引入的外部库
+
+```go
+go get github.com/some/dependency
+```
+
+在使用该命令之后，go.mod会自动更新，并生成 go.sum
+
 构建可执行程序
 
 ```go

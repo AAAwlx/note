@@ -10,7 +10,7 @@ vfsmount 结构用来描述一个被挂载的文件系统所在的挂载点信�
 struct vfsmount {
 	struct list_head mnt_hash;		/* 散列表 */
 	struct vfsmount *mnt_parent;	/* fs we are mounted on */	/* 父文件系统，也就是要挂载到哪个文件系统 */
-	struct dentry *mnt_mountpoint;	/* dentry of mountpoint */	/* 被安装到 */
+	struct dentry *mnt_mountpoint;	/* dentry of mountpoint */	/* 指向文件系统被安装到父文件系统的哪个目录下 */
 	struct dentry *mnt_root;	/* root of the mounted tree */		/* 该文件系统的根目录项 */
 	struct super_block *mnt_sb;	/* pointer to superblock */			/* 该文件系统的超级块 */
 	struct list_head mnt_mounts;	/* list of children, anchored here */		/* 子文件系统链表 */
@@ -282,7 +282,7 @@ static __always_inline void follow_dotdot(struct nameidata *nd)
 
 对于 .. 的处理中，会分为三种情况。
 
-1. 前目录项和根目录相同，此种情况不做处理。
+1. 当前目录项和根目录相同，此种情况不做处理。
 
 2. 当前指向的目录项并不是挂载点的根目录，此种情需将当前指向的目录项向上回溯一个，即将当前目录项指向其对应的父目录。
 
