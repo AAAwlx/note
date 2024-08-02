@@ -12,7 +12,7 @@
 
 pci 是一种总线协议，在计算机体系结构中起到连接主机与 I/O 设备的作用，属于设备总线的一种。
 
-![Alt text](image/总线结构.png)
+![Alt text](../image/总线结构.png)
 
 pci总线下可能连接着网卡，磁盘等多种设备，实现了对这些设备的统一管理。
 
@@ -21,14 +21,14 @@ pci总线采用配置空间、IO 空间和 Memory 空间的划分，将配置端
 ## pci设备类型
 
 pci 设备有多种类型，不同的pci设备有不同的配置头空间的划分
-![Alt text](image/2024-06-19_16-07.png)
+![Alt text](../image/2024-06-19_16-07.png)
 
 1. type0：此类pci设备一般为普通设备，例如网卡，磁盘等。
    如图为type0设备的配置头空间：
-   ![Alt text](image/2024-06-19_16-12.png)
+   ![Alt text](../image/2024-06-19_16-12.png)
    配置头空间中大部分位都遵循pci标准协议，其中部分位由厂商自行定义。
 2. type1：此类设备为pci桥接设备，如上图中的pci桥
-   ![Alt text](image/2024-06-19_16-15.png)
+   ![Alt text](../image/2024-06-19_16-15.png)
 
 通过对配置空间的读取，即可获取对应 pci 设备的设备信息。如bar地址等。
 
@@ -38,13 +38,11 @@ pci 设备有多种类型，不同的pci设备有不同的配置头空间的划�
 
    pci 配置头空间的地址由 pci 配置头空间的基地址，总线号，设备号，功能号组成。
 
-![Alt text](image/2024-06-19_16-26.png)
+![Alt text](../image/2024-06-19_16-26.png)
 
 ```c
  unsigned long pcie_header_base = CSR_DMW0_BASE|base_cfg_addr| (bus << 16) | (device << 11)| (function<<8);
 ```
-
-
 
 2. 解析bar地址
 
