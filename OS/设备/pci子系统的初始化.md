@@ -2,7 +2,7 @@
 
 pci 结构
 
-## 
+## 总线结构
 
 ```c
 struct bus_type pci_bus_type = {
@@ -17,6 +17,8 @@ struct bus_type pci_bus_type = {
 	.pm		= PCI_PM_OPS_PTR,
 };
 ```
+
+在设备管理框架中，bus 是在 object 与 kset 基类上对总线设备更加具象化的描述。
 
 ```c
 struct bus_type_private {
@@ -40,6 +42,98 @@ static int __init pci_driver_init(void)
 }
 postcore_initcall(pci_driver_init);
 ```
+
+```c
+int bus_register(struct bus_type *bus)
+{
+	int retval;
+	struct bus_type_private *priv;
+
+	// 为总线类型的私有数据分配内存
+	priv = kzalloc(sizeof(struct bus_type_private), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+
+	priv->bus = bus;
+	bus->p = priv;
+
+	// 初始化通知头
+	BLOCKING_INIT_NOTIFIER_HEAD(&priv->bus_notifier);
+
+	// 设置总线的 kobject 名称
+	retval = kobject_set_name(&priv->subsys.kobj, "%s", bus->name);
+	if (retval)
+		goto out;
+
+	// 关联 kobject 结构体到总线 kset
+	priv->subsys.kobj.kset = bus_kset;
+	priv->subsys.kobj.ktype = &bus_ktype;
+	priv->drivers_autoprobe = 1;
+
+	// 注册总线的 kset
+	retval = kset_register(&priv->subsys);
+	if (retval)
+		goto out;
+
+	// 为总线创建并注册 uevent 属性文件
+	retval = bus_create_file(bus, &bus_attr_uevent);
+	if (retval)
+		goto bus_uevent_fail;
+
+	// 创建 "devices" kset 并添加到总线的 kobject 子对象
+	priv->devices_kset = kset_create_and_add("devices", NULL,
+						 &priv->subsys.kobj);
+	if (!priv->devices_kset) {
+		retval = -ENOMEM;
+		goto bus_devices_fail;
+	}
+
+	// 创建 "drivers" kset 并添加到总线的 kobject 子对象
+	priv->drivers_kset = kset_create_and_add("drivers", NULL,
+						 &priv->subsys.kobj);
+	if (!priv->drivers_kset) {
+		retval = -ENOMEM;
+		goto bus_drivers_fail;
+	}
+
+	// 初始化设备和驱动的 klist
+	klist_init(&priv->klist_devices, klist_devices_get, klist_devices_put);
+	klist_init(&priv->klist_drivers, NULL, NULL);
+
+	// 添加探测文件（probe files）
+	retval = add_probe_files(bus);
+	if (retval)
+		goto bus_probe_files_fail;
+
+	// 添加总线的属性文件
+	retval = bus_add_attrs(bus);
+	if (retval)
+		goto bus_attrs_fail;
+
+	// 打印调试信息，表示总线已成功注册
+	pr_debug("bus: '%s': registered\n", bus->name);
+	return 0;
+
+bus_attrs_fail:
+	remove_probe_files(bus);
+bus_probe_files_fail:
+	kset_unregister(bus->p->drivers_kset);
+bus_drivers_fail:
+	kset_unregister(bus->p->devices_kset);
+bus_devices_fail:
+	bus_remove_file(bus, &bus_attr_uevent);
+bus_uevent_fail:
+	kset_unregister(&bus->p->subsys);
+	kfree(bus->p);
+out:
+	bus->p = NULL;
+	return retval;
+}
+```
+
+最终形成的层级结构：
+
+![Alt text](../image/2024-08-03_22-41.png)
 
 ## pci总线初始化的入口函数
 
@@ -86,7 +180,7 @@ struct x86_init_ops {
 
 在2.6中包含以下几种初始化的选项。
 
-![Alt text](2024-08-01_15-53.png)
+![Alt text](../image/2024-08-01_15-53.png)
 
 以 `pci_numaq_init` 为例
 
@@ -220,11 +314,52 @@ struct pci_bus * __devinit pcibios_scan_root(int busnum)
 
 通过一系列的调用过程，最后由函数 `pci_scan_child_bus` 执行真正的设备扫描功能。
 
+```c
+unsigned int __devinit pci_scan_child_bus(struct pci_bus *bus)
+{
+	unsigned int devfn, pass, max = bus->secondary;
+	struct pci_dev *dev;
+
+	dev_dbg(&bus->dev, "scanning bus\n");
+
+	/* 遍历总线上挂载的设备并获取他们的信息 */
+	for (devfn = 0; devfn < 0x100; devfn += 8)
+		pci_scan_slot(bus, devfn);
+
+	/* Reserve buses for SR-IOV capability. */
+	max += pci_iov_bus_range(bus);
+
+	/*
+	 * After performing arch-dependent fixup of the bus, look behind
+	 * all PCI-to-PCI bridges on this bus.
+	 */
+	if (!bus->is_added) {
+		dev_dbg(&bus->dev, "fixups for bus\n");
+		pcibios_fixup_bus(bus);
+		if (pci_is_root_bus(bus))
+			bus->is_added = 1;
+	}
+
+	for (pass = 0; pass < 2; pass++)
+        // 遍历总线上的所有设备
+        list_for_each_entry(dev, &bus->devices, bus_list) {
+            // 如果设备是 PCI 桥或 CardBus 桥
+            if (dev->hdr_type == PCI_HEADER_TYPE_BRIDGE ||
+                dev->hdr_type == PCI_HEADER_TYPE_CARDBUS)
+                // 扫描桥接设备并更新最大设备编号
+                max = pci_scan_bridge(bus, dev, max, pass);
+        }
+	dev_dbg(&bus->dev, "bus scan returning with max=%02x\n", max);
+	return max;
+}
+```
+
 并在函数`pci_device_add`中将pci总线下的子设备加入 `pci_bus` 中记录的 `devices` 链表中。
 
 函数调用链：
+
 ```c
-pci_scan_bus_parented() -> pci_scan_child_bus() -> pci_scan_slot() -> pci_scan_single_device() -> pci_device_add()
+pcibios_scan_root() -> pci_scan_bus_parented() -> pci_scan_child_bus() -> pci_scan_slot() -> pci_scan_single_device() -> pci_device_add()
 ```
 
 ```c
@@ -343,5 +478,18 @@ int pci_bus_add_child(struct pci_bus *bus)
 	pci_create_legacy_files(bus);
 
 	return retval;
+}
+```
+
+再将设备加入到fs中就可以通过 sysfs 对设备进行管理。
+
+```c
+int device_create_file(struct device *dev,
+		       const struct device_attribute *attr)
+{
+	int error = 0;
+	if (dev)
+		error = sysfs_create_file(&dev->kobj, &attr->attr);
+	return error;
 }
 ```
