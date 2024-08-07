@@ -1,7 +1,5 @@
 # pci 子系统的初始化
 
-pci 结构
-
 ## 总线结构
 
 ```c
@@ -34,6 +32,8 @@ struct bus_type_private {
 ```
 
 ## 注册pci总线
+
+该函数会在init进程中被隐式的调用。
 
 ```c
 static int __init pci_driver_init(void)
@@ -354,13 +354,124 @@ unsigned int __devinit pci_scan_child_bus(struct pci_bus *bus)
 }
 ```
 
-并在函数`pci_device_add`中将pci总线下的子设备加入 `pci_bus` 中记录的 `devices` 链表中。
-
 函数调用链：
 
 ```c
-pcibios_scan_root() -> pci_scan_bus_parented() -> pci_scan_child_bus() -> pci_scan_slot() -> pci_scan_single_device() -> pci_device_add()
+pcibios_scan_root() -> pci_scan_bus_parented() -> pci_scan_child_bus() -> pci_scan_slot() -> pci_scan_single_device()
 ```
+
+### 处理扫描到得 pci 设备
+
+以下为 `struct pci_dev` ，用来描述 pci 设备的信息。每个 pci 设备都有自己的配置空间，里面写着 pci 设备的配置信息，这些信息最终会被填入到 pci_dev 结构中。
+
+```c
+struct pci_dev {
+	struct list_head bus_list;	/* 在每个总线的设备列表中的节点 */
+
+	struct pci_bus	*bus;		/* 设备所在的 PCI 总线 */
+	struct pci_bus	*subordinate;	/* 设备所连接的桥接总线 */
+
+	void		*sysdata;	/* 系统特定扩展的挂钩 */
+	struct proc_dir_entry *procent;	/* 设备在 /proc/bus/pci 下的条目 */
+	struct pci_slot	*slot;		/* 设备所在的物理插槽 */
+
+	unsigned int	devfn;		/* 编码的设备和函数索引 */
+	unsigned short	vendor;		/* 设备的厂商 ID */
+	unsigned short	device;		/* 设备 ID */
+	unsigned short	subsystem_vendor;	/* 子系统厂商 ID */
+	unsigned short	subsystem_device;	/* 子系统设备 ID */
+	unsigned int	class;		/* 3 字节：基类、次类、编程接口 */
+	u8		revision;	/* PCI 修订版本，类字的低字节 */
+	u8		hdr_type;	/* PCI 头部类型（`multi` 标志被屏蔽） */
+	u8		pcie_cap;	/* PCI-E 能力偏移量 */
+	u8		pcie_type;	/* PCI-E 设备/端口类型 */
+	u8		rom_base_reg;	/* 控制 ROM 的配置寄存器 */
+	u8		pin;  		/* 设备使用的中断引脚 */
+
+	struct pci_driver *driver;	/* 分配此设备的驱动程序 */
+	u64		dma_mask;	/* 设备支持的总线地址的位掩码。通常是 0xffffffff。
+					   只有在设备有缺陷的 DMA 或支持 64 位传输时才需要更改此值。 */
+
+	struct device_dma_parameters dma_parms; /* 设备的 DMA 参数 */
+
+	pci_power_t     current_state;  /* 当前操作状态。在 ACPI 术语中，D0-D3，D0 表示完全功能，
+					   D3 表示关闭。 */
+	int		pm_cap;		/* 配置空间中的 PM 能力偏移量 */
+	unsigned int	pme_support:5;	/* 从哪些状态可以生成 PME# 的位掩码 */
+	unsigned int	pme_interrupt:1;	/* 是否支持 PME 中断 */
+	unsigned int	d1_support:1;	/* 是否支持低功耗状态 D1 */
+	unsigned int	d2_support:1;	/* 是否支持低功耗状态 D2 */
+	unsigned int	no_d1d2:1;	/* 只允许 D0 和 D3 */
+	unsigned int	wakeup_prepared:1; /* 唤醒是否已准备好 */
+	unsigned int	d3_delay;	/* D3->D0 转换时间（毫秒） */
+
+#ifdef CONFIG_PCIEASPM
+	struct pcie_link_state	*link_state;	/* ASPM 链路状态 */
+#endif
+
+	pci_channel_state_t error_state;	/* 当前连接状态 */
+	struct	device	dev;		/* 通用设备接口 */
+
+	int		cfg_size;	/* 配置空间的大小 */
+
+	/*
+	 * 代替直接访问中断线路和基地址寄存器，使用存储在这里的值。它们可能会有所不同！
+	 */
+	unsigned int	irq;		/* 设备的中断号 */
+	struct resource resource[DEVICE_COUNT_RESOURCE]; /* I/O 和内存区域 + 扩展 ROM */
+
+	/* 这些字段用于通用修复 */
+	unsigned int	transparent:1;	/* 透明 PCI 桥接 */
+	unsigned int	multifunction:1;/* 多功能设备的一部分 */
+	/* 记录设备状态 */
+	unsigned int	is_added:1;	/* 设备是否已添加 */
+	unsigned int	is_busmaster:1; /* 设备是否为总线主控 */
+	unsigned int	no_msi:1;	/* 设备是否可能不使用 MSI */
+	unsigned int	block_ucfg_access:1;	/* 阻止用户空间访问配置空间 */
+	unsigned int	broken_parity_status:1;	/* 设备生成假阳性奇偶性错误 */
+	unsigned int	irq_reroute_variant:2;	/* 设备是否需要 IRQ 重新路由变体 */
+	unsigned int 	msi_enabled:1;	/* MSI 是否启用 */
+	unsigned int	msix_enabled:1;	/* MSI-X 是否启用 */
+	unsigned int	ari_enabled:1;	/* ARI 转发是否启用 */
+	unsigned int	is_managed:1;	/* 设备是否被管理 */
+	unsigned int	is_pcie:1;	/* PCI-E 设备（已废弃，将被移除） */
+	unsigned int    needs_freset:1; /* 设备是否需要基础重置 */
+	unsigned int	state_saved:1;	/* 设备状态是否已保存 */
+	unsigned int	is_physfn:1;	/* 是否是物理功能（PF） */
+	unsigned int	is_virtfn:1;	/* 是否是虚拟功能（VF） */
+	unsigned int	reset_fn:1;	/* 是否需要重置功能 */
+	unsigned int    is_hotplug_bridge:1;	/* 是否是热插拔桥接 */
+	unsigned int    aer_firmware_first:1;	/* 是否优先固件 AER */
+	pci_dev_flags_t dev_flags;	/* 设备标志 */
+	atomic_t	enable_cnt;	/* pci_enable_device 是否已被调用 */
+
+	u32		saved_config_space[16]; /* 挂起时保存的配置空间 */
+	struct hlist_head saved_cap_space; /* 保存的能力空间的头 */
+	struct bin_attribute *rom_attr; /* sysfs ROM 条目的属性描述符 */
+	int rom_attr_enabled;		/* ROM 属性的显示是否已启用 */
+	struct bin_attribute *res_attr[DEVICE_COUNT_RESOURCE]; /* 资源的 sysfs 文件 */
+	struct bin_attribute *res_attr_wc[DEVICE_COUNT_RESOURCE]; /* 资源的 WC 映射的 sysfs 文件 */
+#ifdef CONFIG_PCI_MSI
+	struct list_head msi_list; /* MSI 列表 */
+#endif
+	struct pci_vpd *vpd;	/* VPD 结构体 */
+#ifdef CONFIG_PCI_IOV
+	union {
+		struct pci_sriov *sriov;	/* SR-IOV 能力相关 */
+		struct pci_dev *physfn;	/* 与此 VF 关联的 PF */
+	};
+	struct pci_ats	*ats;	/* 地址转换服务 */
+#endif
+};
+```
+
+对于扫描到的 pci 设备处理，将会分为两路进行。分别为对 `struct pci_dev` 中的通用设备结构体 `struct device dev` 的初始化，与对其余设备配置信息的初始化。
+
+![Alt text](../image/pci设备初始化.png)
+
+#### 初始化 device
+
+在函数 `pci_device_add` 中将pci总线下的子设备加入 `pci_bus` 中记录的 `devices` 链表中。
 
 ```c
 void pci_device_add(struct pci_dev *dev, struct pci_bus *bus)
@@ -395,6 +506,60 @@ void pci_device_add(struct pci_dev *dev, struct pci_bus *bus)
 	down_write(&pci_bus_sem);  // 获取总线的写锁
 	list_add_tail(&dev->bus_list, &bus->devices);  // 将设备添加到总线的设备列表中
 	up_write(&pci_bus_sem);  // 释放总线的写锁
+}
+```
+
+#### 获取 pci 设备的信息
+
+```c
+static struct pci_dev *pci_scan_device(struct pci_bus *bus, int devfn)
+{
+	struct pci_dev *dev;
+	u32 l;
+	int delay = 1;
+
+	/* 读取设备的厂商 ID 和设备 ID */
+	if (pci_bus_read_config_dword(bus, devfn, PCI_VENDOR_ID, &l))
+		return NULL;
+
+	/* 一些损坏的板卡如果插槽为空会返回 0 或 ~0： */
+	if (l == 0xffffffff || l == 0x00000000 ||
+	    l == 0x0000ffff || l == 0xffff0000)
+		return NULL;
+
+	/* 配置请求重试状态 */
+	while (l == 0xffff0001) {
+		msleep(delay);  /* 等待一段时间 */
+		delay *= 2;     /* 每次重试时增加延迟 */
+		if (pci_bus_read_config_dword(bus, devfn, PCI_VENDOR_ID, &l))
+			return NULL;
+		/* 如果卡在 60 秒内没有响应，说明可能出现了问题 */
+		if (delay > 60 * 1000) {
+			printk(KERN_WARNING "pci %04x:%02x:%02x.%d: not "
+					"responding\n", pci_domain_nr(bus),
+					bus->number, PCI_SLOT(devfn),
+					PCI_FUNC(devfn));
+			return NULL;
+		}
+	}
+
+	/* 分配并初始化 PCI 设备结构体 */
+	dev = alloc_pci_dev();
+	if (!dev)
+		return NULL;
+
+	dev->bus = bus;
+	dev->devfn = devfn;
+	dev->vendor = l & 0xffff;
+	dev->device = (l >> 16) & 0xffff;
+
+	/* 设置设备的其他配置信息 */
+	if (pci_setup_device(dev)) {
+		kfree(dev);
+		return NULL;
+	}
+
+	return dev;
 }
 ```
 
@@ -491,5 +656,110 @@ int device_create_file(struct device *dev,
 	if (dev)
 		error = sysfs_create_file(&dev->kobj, &attr->attr);
 	return error;
+}
+```
+
+## 初始化一个pci设备
+
+```c
+static struct pci_driver inic_pci_driver = {
+	.name 		= DRV_NAME,
+	.id_table	= inic_pci_tbl,
+#ifdef CONFIG_PM
+	.suspend	= ata_pci_device_suspend,
+	.resume		= inic_pci_device_resume,
+#endif
+	.probe 		= inic_init_one,
+	.remove		= ata_pci_remove_one,
+};
+```
+
+```c
+#define pci_register_driver(driver)		\
+	__pci_register_driver(driver, THIS_MODULE, KBUILD_MODNAME)
+```
+
+```c
+int __pci_register_driver(struct pci_driver *drv, struct module *owner,
+			  const char *mod_name)
+{
+	int error;
+
+	/* initialize common driver fields */
+	drv->driver.name = drv->name;
+	drv->driver.bus = &pci_bus_type;
+	drv->driver.owner = owner;
+	drv->driver.mod_name = mod_name;
+
+	spin_lock_init(&drv->dynids.lock);
+	INIT_LIST_HEAD(&drv->dynids.list);
+
+	/* register with core */
+	error = driver_register(&drv->driver);
+	if (error)
+		goto out;
+
+	error = pci_create_newid_file(drv);
+	if (error)
+		goto out_newid;
+
+	error = pci_create_removeid_file(drv);
+	if (error)
+		goto out_removeid;
+out:
+	return error;
+
+out_removeid:
+	pci_remove_newid_file(drv);
+out_newid:
+	driver_unregister(&drv->driver);
+	goto out;
+}
+```
+
+```c
+int driver_register(struct device_driver *drv)
+{
+	int ret;
+	struct device_driver *other;
+
+	BUG_ON(!drv->bus->p);
+
+	if ((drv->bus->probe && drv->probe) ||
+	    (drv->bus->remove && drv->remove) ||
+	    (drv->bus->shutdown && drv->shutdown))
+		printk(KERN_WARNING "Driver '%s' needs updating - please use "
+			"bus_type methods\n", drv->name);
+
+	other = driver_find(drv->name, drv->bus);
+	if (other) {
+		put_driver(other);
+		printk(KERN_ERR "Error: Driver '%s' is already registered, "
+			"aborting...\n", drv->name);
+		return -EBUSY;
+	}
+
+	ret = bus_add_driver(drv);
+	if (ret)
+		return ret;
+	ret = driver_add_groups(drv, drv->groups);
+	if (ret)
+		bus_remove_driver(drv);
+	return ret;
+}
+```
+支持热插拔
+```c
+pci_create_removeid_file(struct pci_driver *drv)
+{
+	int error = 0;
+	if (drv->probe != NULL)
+		error = driver_create_file(&drv->driver,&driver_attr_remove_id);
+	return error;
+}
+
+static void pci_remove_removeid_file(struct pci_driver *drv)
+{
+	driver_remove_file(&drv->driver, &driver_attr_remove_id);
 }
 ```

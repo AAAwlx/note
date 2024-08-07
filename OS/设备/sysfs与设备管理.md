@@ -35,6 +35,8 @@ struct sysfs_dirent {
 };
 ```
 
+### sys_buffer
+
 `sysfs_buffer` 结构是 sysfs 中用做读写的缓冲区。由于 sysfs 仅仅存在于内存中，并不是普通的文件。对于sysfs中文件的写入与读取，其实是对设备控制信息的写入与读取。该结构体的作用就是用来记录写入信息的。
 
 ```c
@@ -196,3 +198,76 @@ static struct dentry * sysfs_lookup(struct inode *dir, struct dentry *dentry, st
 最终文件系统结构与设备管理框架结构的关系
 
 ![Alt text](../image/sysdir.png)
+
+## 读取或写入设备属性
+
+设备属性的读写由 sysfs 中注册的文件读写来实现
+
+```c
+const struct file_operations sysfs_file_operations = {
+	.read		= sysfs_read_file,
+	.write		= sysfs_write_file,
+	.llseek		= generic_file_llseek,
+	.open		= sysfs_open_file,
+	.release	= sysfs_release,
+	.poll		= sysfs_poll,
+};
+```
+
+在函数 `sysfs_read_file` 中真正实现读功能的为函数 `fill_read_buffer`
+
+```c
+static int fill_read_buffer(struct dentry *dentry, struct sysfs_buffer *buffer)
+{
+    // 获取与 dentry 关联的 sysfs_dirent 结构体
+    struct sysfs_dirent *attr_sd = dentry->d_fsdata;
+    // 获取 sysfs_dirent 的父对象的 kobject
+    struct kobject *kobj = attr_sd->s_parent->s_dir.kobj;
+    // 获取 sysfs_ops 结构体，它定义了 sysfs 属性的操作函数
+    const struct sysfs_ops *ops = buffer->ops;
+    int ret = 0;  // 用于存储函数的返回值，初始化为 0（成功）
+    ssize_t count; // 存储读取的字节数
+
+    // 如果 buffer->page 为空，则分配一页大小的零初始化内存
+    if (!buffer->page)
+        buffer->page = (char *) get_zeroed_page(GFP_KERNEL);
+    // 如果内存分配失败，则返回 -ENOMEM（内存不足）
+    if (!buffer->page)
+        return -ENOMEM;
+
+    // 确保 sysfs_dirent 处于活动状态
+    if (!sysfs_get_active(attr_sd))
+        return -ENODEV; // 如果未激活，则返回 -ENODEV（设备不存在）
+
+    // 读取事件值并存储在 buffer->event 中
+    buffer->event = atomic_read(&attr_sd->s_attr.open->event);
+    // 调用 ops->show 函数从 kobject 中读取数据到 buffer->page
+    count = ops->show(kobj, attr_sd->s_attr.attr, buffer->page);
+
+    // 释放 sysfs_dirent 的活动状态
+    sysfs_put_active(attr_sd);
+
+    /*
+     * 如果 ops->show 返回的字节数大于或等于 PAGE_SIZE，可能会导致数据截断或溢出
+     * 因此，限制 count 为 PAGE_SIZE - 1，并打印警告信息
+     */
+    if (count >= (ssize_t)PAGE_SIZE) {
+        print_symbol("fill_read_buffer: %s returned bad count\n",
+            (unsigned long)ops->show);
+        // 为了继续处理，将 count 设置为 PAGE_SIZE - 1
+        count = PAGE_SIZE - 1;
+    }
+    if (count >= 0) {
+        // 如果 count 非负，则更新 buffer 的字段
+        buffer->needs_read_fill = 0;
+        buffer->count = count;
+    } else {
+        // 如果 count 为负数，则返回错误码
+        ret = count;
+    }
+    return ret; // 返回结果
+}
+
+```
+
+`ops->show` 即为 `sysfs_ops` 其中注册了设备提供给 sysfs 的对设备属性的读写方法。
