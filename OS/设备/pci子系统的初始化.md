@@ -1,6 +1,25 @@
 # pci 子系统的初始化
 
+![Alt text](../image/pci子系统初始化.png)
+
 ## 总线结构
+
+在设备管理框架中，bus 是在 kobject 与 kset 基类上对总线设备更加具象化的描述。
+
+```c
+struct bus_type_private {
+	struct kset subsys;                  // 此总线的主 kset
+	struct kset *drivers_kset;           // 与此总线关联的驱动程序的 kset
+	struct kset *devices_kset;           // 与此总线关联的设备的 kset
+	struct klist klist_devices;          // 遍历设备的 klist
+	struct klist klist_drivers;          // 遍历驱动程序的 klist
+	struct blocking_notifier_head bus_notifier;  // 总线事件的通知器头
+	unsigned int drivers_autoprobe:1;    // 自动探测驱动程序标志位
+	struct bus_type *bus;                // 指向关联的总线类型
+};
+```
+
+这是一个 pci 总线实例：
 
 ```c
 struct bus_type pci_bus_type = {
@@ -16,21 +35,6 @@ struct bus_type pci_bus_type = {
 };
 ```
 
-在设备管理框架中，bus 是在 object 与 kset 基类上对总线设备更加具象化的描述。
-
-```c
-struct bus_type_private {
-	struct kset subsys;                  // 此总线的主 kset
-	struct kset *drivers_kset;           // 与此总线关联的驱动程序的 kset
-	struct kset *devices_kset;           // 与此总线关联的设备的 kset
-	struct klist klist_devices;          // 遍历设备的 klist
-	struct klist klist_drivers;          // 遍历驱动程序的 klist
-	struct blocking_notifier_head bus_notifier;  // 总线事件的通知器头
-	unsigned int drivers_autoprobe:1;    // 自动探测驱动程序标志位
-	struct bus_type *bus;                // 指向关联的总线类型
-};
-```
-
 ## 注册pci总线
 
 该函数会在init进程中被隐式的调用。
@@ -42,6 +46,8 @@ static int __init pci_driver_init(void)
 }
 postcore_initcall(pci_driver_init);
 ```
+
+总线类型的注册函数：
 
 ```c
 int bus_register(struct bus_type *bus)
@@ -182,7 +188,7 @@ struct x86_init_ops {
 
 ![Alt text](../image/2024-08-01_15-53.png)
 
-以 `pci_numaq_init` 为例
+以 `pci_numaq_init` 为例：
 
 ```c
 //初始化 NUMA (非一致性内存访问) 环境下的 PCI 总线。
@@ -511,6 +517,8 @@ void pci_device_add(struct pci_dev *dev, struct pci_bus *bus)
 
 #### 获取 pci 设备的信息
 
+在该函数往后的调用链中，对 PCI 设备进行了初始化，并设置其配置空间的相关信息
+
 ```c
 static struct pci_dev *pci_scan_device(struct pci_bus *bus, int devfn)
 {
@@ -561,6 +569,136 @@ static struct pci_dev *pci_scan_device(struct pci_bus *bus, int devfn)
 
 	return dev;
 }
+```
+
+```c
+int pci_setup_device(struct pci_dev *dev)
+{
+    u32 class;
+    u8 hdr_type;
+    struct pci_slot *slot;
+    int pos = 0;
+
+    // 读取 PCI 设备的头部类型
+    if (pci_read_config_byte(dev, PCI_HEADER_TYPE, &hdr_type))
+        return -EIO; // 读取失败，返回 I/O 错误
+
+    // 设置设备的基本信息
+    dev->sysdata = dev->bus->sysdata;
+    dev->dev.parent = dev->bus->bridge;
+    dev->dev.bus = &pci_bus_type;
+    dev->hdr_type = hdr_type & 0x7f; // 获取头部类型（忽略多功能标志）
+    dev->multifunction = !!(hdr_type & 0x80); // 判断是否为多功能设备
+    dev->error_state = pci_channel_io_normal; // 设置错误状态为正常
+    set_pcie_port_type(dev); // 设置 PCIe 端口类型
+    set_pci_aer_firmware_first(dev); // 设置 PCI AER 固件优先
+
+    // 根据设备功能号查找设备插槽
+    list_for_each_entry(slot, &dev->bus->slots, list)
+        if (PCI_SLOT(dev->devfn) == slot->number)
+            dev->slot = slot;
+
+    // 默认假设设备是 32 位 PCI，64 位 PCI 设备可以自行调整
+    dev->dma_mask = 0xffffffff;
+
+    // 设置设备名称，包括 PCI 域、总线号、插槽号和功能号
+    dev_set_name(&dev->dev, "%04x:%02x:%02x.%d", pci_domain_nr(dev->bus),
+                 dev->bus->number, PCI_SLOT(dev->devfn),
+                 PCI_FUNC(dev->devfn));
+
+    // 读取并解析设备的类别和版本信息
+    pci_read_config_dword(dev, PCI_CLASS_REVISION, &class);
+    dev->revision = class & 0xff; // 获取版本号
+    class >>= 8; // 上移以获取类别
+    dev->class = class; // 设备类别
+    class >>= 8; // 再次上移以获取子类别
+
+    // 打印设备信息到调试日志
+    dev_dbg(&dev->dev, "found [%04x:%04x] class %06x header type %02x\n",
+            dev->vendor, dev->device, class, dev->hdr_type);
+
+    // 设备配置空间大小的计算
+    dev->cfg_size = pci_cfg_space_size(dev);
+
+    // 设置当前电源状态为“未知”
+    dev->current_state = PCI_UNKNOWN;
+
+    // 早期修复，在探测 BARs 之前
+    pci_fixup_device(pci_fixup_early, dev);
+    // 设备类别可能在修复后发生变化
+    class = dev->class >> 8;
+
+    // 根据设备的头部类型进行处理
+    switch (dev->hdr_type) {
+    case PCI_HEADER_TYPE_NORMAL: // 标准头部
+        if (class == PCI_CLASS_BRIDGE_PCI)
+            goto bad; // 如果设备类别是 PCI 桥，但头部类型是标准类型，则标记为错误
+        pci_read_irq(dev); // 读取中断信息
+        pci_read_bases(dev, 6, PCI_ROM_ADDRESS); // 读取 BAR 信息
+        pci_read_config_word(dev, PCI_SUBSYSTEM_VENDOR_ID, &dev->subsystem_vendor); // 读取子系统厂商 ID
+        pci_read_config_word(dev, PCI_SUBSYSTEM_ID, &dev->subsystem_device); // 读取子系统设备 ID
+
+        // 处理旧版 IDE 控制器的特定配置
+        if (class == PCI_CLASS_STORAGE_IDE) {
+            u8 progif;
+            pci_read_config_byte(dev, PCI_CLASS_PROG, &progif); // 读取编程接口
+            if ((progif & 1) == 0) {
+                dev->resource[0].start = 0x1F0;
+                dev->resource[0].end = 0x1F7;
+                dev->resource[0].flags = LEGACY_IO_RESOURCE;
+                dev->resource[1].start = 0x3F6;
+                dev->resource[1].end = 0x3F6;
+                dev->resource[1].flags = LEGACY_IO_RESOURCE;
+            }
+            if ((progif & 4) == 0) {
+                dev->resource[2].start = 0x170;
+                dev->resource[2].end = 0x177;
+                dev->resource[2].flags = LEGACY_IO_RESOURCE;
+                dev->resource[3].start = 0x376;
+                dev->resource[3].end = 0x376;
+                dev->resource[3].flags = LEGACY_IO_RESOURCE;
+            }
+        }
+        break;
+
+    case PCI_HEADER_TYPE_BRIDGE: // 桥接头部
+        if (class != PCI_CLASS_BRIDGE_PCI)
+            goto bad; // 如果设备类别不是 PCI 桥，则标记为错误
+        pci_read_irq(dev); // 读取中断信息
+        dev->transparent = ((dev->class & 0xff) == 1); // 判断是否为透明桥
+        pci_read_bases(dev, 2, PCI_ROM_ADDRESS1); // 读取 BAR 信息
+        set_pcie_hotplug_bridge(dev); // 设置 PCIe 热插拔桥接
+        pos = pci_find_capability(dev, PCI_CAP_ID_SSVID); // 查找 SSVID 扩展功能
+        if (pos) {
+            pci_read_config_word(dev, pos + PCI_SSVID_VENDOR_ID, &dev->subsystem_vendor); // 读取子系统厂商 ID
+            pci_read_config_word(dev, pos + PCI_SSVID_DEVICE_ID, &dev->subsystem_device); // 读取子系统设备 ID
+        }
+        break;
+
+    case PCI_HEADER_TYPE_CARDBUS: // CardBus 桥接头部
+        if (class != PCI_CLASS_BRIDGE_CARDBUS)
+            goto bad; // 如果设备类别不是 CardBus 桥，则标记为错误
+        pci_read_irq(dev); // 读取中断信息
+        pci_read_bases(dev, 1, 0); // 读取 BAR 信息
+        pci_read_config_word(dev, PCI_CB_SUBSYSTEM_VENDOR_ID, &dev->subsystem_vendor); // 读取子系统厂商 ID
+        pci_read_config_word(dev, PCI_CB_SUBSYSTEM_ID, &dev->subsystem_device); // 读取子系统设备 ID
+        break;
+
+    default: // 未知头部类型
+        dev_err(&dev->dev, "unknown header type %02x, "
+                "ignoring device\n", dev->hdr_type);
+        return -EIO; // 返回 I/O 错误
+
+    bad:
+        dev_err(&dev->dev, "ignoring class %02x (doesn't match header "
+                "type %02x)\n", class, dev->hdr_type);
+        dev->class = PCI_CLASS_NOT_DEFINED; // 标记为未定义的类别
+    }
+
+    // 设备配置完成，返回成功
+    return 0;
+}
+
 ```
 
 ### 添加设备到设备管理框架中
@@ -659,7 +797,33 @@ int device_create_file(struct device *dev,
 }
 ```
 
-## 初始化一个pci设备
+## 初始化一个 pci 设备
+
+在 pci 子系统初始化的过程中，也会对总线上扫描到得 pci 设备进行初始化。
+
+以下为初始化 pci 设备的调用链：
+
+```c
+pci_bus_add_devices() -> pci_bus_add_device() -> device_add() -> bus_probe_device() -> device_attach() -> __device_attach() ->driver_probe_device() -> really_probe() -> dev->bus->probe(dev) -> pci_device_probe() -> __pci_device_probe() -> pci_call_probe() -> local_pci_probe() -> pci_driver.probe()
+```
+
+其中 `dev->bus->probe(dev)` 为 `bus_type` 中的成员函数 `probe` 。该函数用作总线设备的探测函数，每个不同的总线设备都有不同的 `probe` 函数。
+
+```c
+struct bus_type pci_bus_type = {
+	.name		= "pci",
+	.match		= pci_bus_match,
+	.uevent		= pci_uevent,
+	.probe		= pci_device_probe,
+	.remove		= pci_device_remove,
+	.shutdown	= pci_device_shutdown,
+	.dev_attrs	= pci_dev_attrs,
+	.bus_attrs	= pci_bus_attrs,
+	.pm		= PCI_PM_OPS_PTR,
+};
+```
+在 pci 总线注册的 probe 函数中会逐层向下最终调用到具体的 pci 设备注册的 probe 函数中。
+以 sata 为例：
 
 ```c
 static struct pci_driver inic_pci_driver = {
@@ -674,92 +838,4 @@ static struct pci_driver inic_pci_driver = {
 };
 ```
 
-```c
-#define pci_register_driver(driver)		\
-	__pci_register_driver(driver, THIS_MODULE, KBUILD_MODNAME)
-```
-
-```c
-int __pci_register_driver(struct pci_driver *drv, struct module *owner,
-			  const char *mod_name)
-{
-	int error;
-
-	/* initialize common driver fields */
-	drv->driver.name = drv->name;
-	drv->driver.bus = &pci_bus_type;
-	drv->driver.owner = owner;
-	drv->driver.mod_name = mod_name;
-
-	spin_lock_init(&drv->dynids.lock);
-	INIT_LIST_HEAD(&drv->dynids.list);
-
-	/* register with core */
-	error = driver_register(&drv->driver);
-	if (error)
-		goto out;
-
-	error = pci_create_newid_file(drv);
-	if (error)
-		goto out_newid;
-
-	error = pci_create_removeid_file(drv);
-	if (error)
-		goto out_removeid;
-out:
-	return error;
-
-out_removeid:
-	pci_remove_newid_file(drv);
-out_newid:
-	driver_unregister(&drv->driver);
-	goto out;
-}
-```
-
-```c
-int driver_register(struct device_driver *drv)
-{
-	int ret;
-	struct device_driver *other;
-
-	BUG_ON(!drv->bus->p);
-
-	if ((drv->bus->probe && drv->probe) ||
-	    (drv->bus->remove && drv->remove) ||
-	    (drv->bus->shutdown && drv->shutdown))
-		printk(KERN_WARNING "Driver '%s' needs updating - please use "
-			"bus_type methods\n", drv->name);
-
-	other = driver_find(drv->name, drv->bus);
-	if (other) {
-		put_driver(other);
-		printk(KERN_ERR "Error: Driver '%s' is already registered, "
-			"aborting...\n", drv->name);
-		return -EBUSY;
-	}
-
-	ret = bus_add_driver(drv);
-	if (ret)
-		return ret;
-	ret = driver_add_groups(drv, drv->groups);
-	if (ret)
-		bus_remove_driver(drv);
-	return ret;
-}
-```
-支持热插拔
-```c
-pci_create_removeid_file(struct pci_driver *drv)
-{
-	int error = 0;
-	if (drv->probe != NULL)
-		error = driver_create_file(&drv->driver,&driver_attr_remove_id);
-	return error;
-}
-
-static void pci_remove_removeid_file(struct pci_driver *drv)
-{
-	driver_remove_file(&drv->driver, &driver_attr_remove_id);
-}
-```
+`inic_pci_driver` 结构体中的 `inic_init_one` 函数即为 sata 的初始化程序。
