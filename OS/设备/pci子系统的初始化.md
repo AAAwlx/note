@@ -839,3 +839,108 @@ static struct pci_driver inic_pci_driver = {
 ```
 
 `inic_pci_driver` 结构体中的 `inic_init_one` 函数即为 sata 的初始化程序。
+
+那 pci_driver 又如何与 pci_dev 建立联系？
+
+![Alt text](../image/pci驱动程序.png)
+
+在函数`device_attach`中，检测设备是否有驱动程序。如果没有指向的pci设备驱动程序，则会调用 ` bus_for_each_drv `遍历设备驱动列表，找到与设备匹配的设备驱动结构。并调用回调函数 `__device_attach` 执行后续的初始化流程。
+
+![Alt text](../image/2024-08-09_15-06.png)
+
+函数 bus_for_each_drv ：
+```c
+int bus_for_each_drv(struct bus_type *bus, struct device_driver *start,
+		     void *data, int (*fn)(struct device_driver *, void *))
+{
+	struct klist_iter i;
+	struct device_driver *drv;
+	int error = 0;
+
+	if (!bus)
+		return -EINVAL;
+
+	// 初始化驱动程序列表迭代器
+	klist_iter_init_node(&bus->p->klist_drivers, &i,
+			     start ? &start->p->knode_bus : NULL);
+	
+	// 遍历驱动程序列表，并对每个驱动程序调用回调函数
+	while ((drv = next_driver(&i)) && !error)
+		error = fn(drv, data);
+	
+	// 退出驱动程序列表迭代器
+	klist_iter_exit(&i);
+	
+	return error;
+}
+```
+
+注意，在这里找到的是 `device_driver` 结构，而并非 `pci_driver` 。但是通过 `device_driver` 在内核提供的宏的帮助下，就能找到 `pci_driver` 结构。
+
+那么我们获取 `pci_driver` 结构又需要经历哪些过程？
+
+在回调函数 `__device_attach` 中，会先调用 `driver_match_device` 函数。
+
+```c
+static int __device_attach(struct device_driver *drv, void *data)
+{
+	struct device *dev = data;
+
+	if (!driver_match_device(drv, dev))
+		return 0;
+
+	return driver_probe_device(drv, dev);
+}
+```
+
+该函数最终会调用总线设备注册的 match 函数，在pci子系统中即为 `pci_bus_match` 。
+
+![图 0](../../images/317842fe1016229bd9b179c76ac485d89574e2281b4730d94c6af8b76f164329.png)
+
+匹配成功后，就会去触发 `pci_device_probe` 的执行
+
+![Alt text](image.png)
+
+```c
+#define to_pci_dev(n) container_of(n, struct pci_dev, dev)
+
+```
+
+`container_of` 是内核提供的一个宏，他会通过结构体成员的地址，找到整个结构体的地址。在这里，我们通过 `device_driver` 找到 `pci_driver` 至此一路向下执行直至 pci 设备初始化完成。
+
+### 注册 pci 设备驱动结构
+
+在上文中提到了在pci设备初始化的过程中，会遍历 `bus->p->klist_drivers` 列表，找到与设备相匹配的设备驱动结构，那么 klist_drivers 中的设备驱动结构 `device_driver` 又从何而来？
+
+以 sata 控制器为例，在注册该设备驱动时，作为一个 pci 设备会调用函数 `pci_register_driver` 。
+
+```c
+static int __init inic_init(void)
+{
+	return pci_register_driver(&inic_pci_driver);
+}
+module_init(inic_init);
+```
+
+```c
+#define pci_register_driver(driver)		\
+	__pci_register_driver(driver, THIS_MODULE, KBUILD_MODNAME)
+```
+
+函数调用链：
+
+```c
+inic_init() -> pci_register_driver() -> __pci_register_driver() -> driver_register() -> bus_add_driver()
+```
+
+在函数`bus_add_driver`中，会将`pci_driver`中的成员`device_driver`添加到 `bus_type` 中私有结构成员 `p` 中的 `klist_drivers`。
+
+![Alt text](../image/2024-08-09_15-03.png)
+
+```c
+struct bus_type_private {
+	...
+	struct klist klist_drivers;          // 遍历驱动程序的 klist
+	...
+}
+```
