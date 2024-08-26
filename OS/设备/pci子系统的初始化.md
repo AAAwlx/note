@@ -186,7 +186,7 @@ struct x86_init_ops {
 
 在2.6中包含以下几种初始化的选项。
 
-![Alt text](../image/2024-08-01_15-53.png)
+<img src="../image/2024-08-01_15-53.png" alt="Alt text" style="zoom:150%;" />
 
 以 `pci_numaq_init` 为例：
 
@@ -899,7 +899,7 @@ static int __device_attach(struct device_driver *drv, void *data)
 
 匹配成功后，就会去触发 `pci_device_probe` 的执行
 
-![Alt text](image.png)
+![Alt text](../image/image.png)
 
 ```c
 #define to_pci_dev(n) container_of(n, struct pci_dev, dev)
