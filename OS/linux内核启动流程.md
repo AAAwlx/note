@@ -1,6 +1,6 @@
 # linux内核启动流程
 
-![Alt text](linux%E5%90%AF%E5%8A%A8.png)
+![Alt text](./image/linux启动.png)
 
 ## 内核自解压
 
@@ -427,5 +427,165 @@ if (initrd_start && !initrd_below_start_ok &&
 
 	/* Do the rest non-__init'ed, we're now alive */
 	rest_init();//系统启动后的初始化函数
+}
+```
+
+在完成任务后start_kernel所在的0号进程会退化为idle进程，当一个core上没有任务可运行时就会去运行idle进程使系统进入休眠状态进入低功耗模式。
+
+## 第1号线程 kernel_init
+
+```c
+static int __init kernel_init(void * unused)
+{
+	lock_kernel();  // 加锁内核，防止在关键初始化阶段被中断
+
+	/*
+	 * init可以在任何节点上分配页面
+	 */
+	set_mems_allowed(node_states[N_HIGH_MEMORY]);
+
+	/*
+	 * init可以在任何CPU上运行
+	 */
+	set_cpus_allowed_ptr(current, cpu_all_mask);
+
+	/*
+	 * 告诉系统，我们将成为无辜孤儿进程的处理者。
+	 *
+	 * 我们不希望人们对这个任务数组中的位置有错误的假设。
+	 */
+	init_pid_ns.child_reaper = current;
+
+	cad_pid = task_pid(current);  // 获取当前进程的PID
+
+	smp_prepare_cpus(setup_max_cpus);  // 准备多处理器系统
+
+	do_pre_smp_initcalls();  // 执行早期的SMP初始化调用
+
+	start_boot_trace();  // 启动引导跟踪
+
+	smp_init();  // 初始化SMP
+
+	sched_init_smp();  // 初始化调度器的SMP部分
+
+	do_basic_setup();  // 执行基本的系统设置
+
+	/* 打开根文件系统上的/dev/console，这一步不应失败 */
+	if (sys_open((const char __user *) "/dev/console", O_RDWR, 0) < 0)
+		printk(KERN_WARNING "Warning: unable to open an initial console.\n");
+
+	(void) sys_dup(0);  // 复制标准输入
+	(void) sys_dup(0);  // 复制标准输入
+
+	/*
+	 * 检查是否存在早期用户空间初始化程序。如果存在，则让它完成所有工作。
+	 */
+	if (!ramdisk_execute_command)
+		ramdisk_execute_command = "/init";
+
+	if (sys_access((const char __user *) ramdisk_execute_command, 0) != 0) {//检查文件的存在性，与当前进程是否具有权限
+		ramdisk_execute_command = NULL;
+		prepare_namespace();  // 准备根文件系统命名空间
+	}
+
+	/*
+	 * 初始化完成，系统基本运行起来了。清理初始化内存段并启动用户模式进程。
+	 */
+	init_post();
+
+	return 0;
+}
+```
+
+最终在 init_post 函数中会尝试寻找根文件系统中 `init` 进程的代码，最终 `kernel_init` 会转变为 `init` 进程。
+
+```c
+static noinline int init_post(void)
+	__releases(kernel_lock)  // 释放 kernel_lock 锁
+{
+	/* 需要在释放内存之前完成所有异步的 `__init` 代码 */
+	async_synchronize_full();  // 等待所有异步的初始化操作完成
+	free_initmem();  // 释放 `init` 部分的内存
+	unlock_kernel();  // 解锁内核
+	mark_rodata_ro();  // 将只读数据标记为只读
+	system_state = SYSTEM_RUNNING;  // 更新系统状态为 "运行中"
+	numa_default_policy();  // 设置默认的 NUMA 策略
+
+	/* 将当前进程的信号标记为不可杀死，防止 `init` 进程被意外终止 */
+	current->signal->flags |= SIGNAL_UNKILLABLE;
+
+	/* 如果存在 `ramdisk_execute_command`，则执行该命令 */
+	if (ramdisk_execute_command) {
+		run_init_process(ramdisk_execute_command);  // 尝试执行内存盘上的初始化命令
+		printk(KERN_WARNING "Failed to execute %s\n",
+				ramdisk_execute_command);  // 如果执行失败，打印警告信息
+	}
+
+	/*
+	 * 我们会依次尝试以下命令，直到一个成功为止。
+	 *
+	 * 如果系统非常损坏，可以使用 Bourne shell 代替 `init` 进行恢复。
+	 */
+	if (execute_command) {
+		run_init_process(execute_command);  // 尝试执行指定的初始化命令
+		printk(KERN_WARNING "Failed to execute %s.  Attempting "
+					"defaults...\n", execute_command);  // 如果失败，打印警告信息并尝试默认命令
+	}
+
+	/* 尝试启动不同位置的 `init` 程序，直到成功 */
+	run_init_process("/sbin/init");
+	run_init_process("/etc/init");
+	run_init_process("/bin/init");
+	run_init_process("/bin/sh");  // 如果其他所有初始化进程都失败，尝试启动 shell
+
+	/* 如果没有找到任何 `init` 进程，则触发 kernel panic，并提示用户传递 `init=` 选项 */
+	panic("No init found.  Try passing init= option to kernel. "
+	      "See Linux Documentation/init.txt for guidance.");
+}
+```
+
+## 2号进程 kthreadd
+
+kthreadd 与 kernel_init 均在函数 rest_init 中创建。
+
+在该函数中会遍历 kthread_create_list 链表，并创建所有的内核线程。
+
+```c
+int kthreadd(void *unused)
+{
+    struct task_struct *tsk = current;
+ 
+    /* Setup a clean context for our children to inherit. */
+    set_task_comm(tsk, "kthreadd");
+    ignore_signals(tsk);
+    set_cpus_allowed_ptr(tsk, cpu_all_mask);
+    set_mems_allowed(node_states[N_MEMORY]);
+ 
+    current->flags |= PF_NOFREEZE;
+    cgroup_init_kthreadd();
+ 
+    for (;;) {
+        set_current_state(TASK_INTERRUPTIBLE);
+        if (list_empty(&kthread_create_list))
+            schedule();
+        __set_current_state(TASK_RUNNING);
+ 
+        spin_lock(&kthread_create_lock);
+        while (!list_empty(&kthread_create_list)) {
+            struct kthread_create_info *create;
+ 
+            create = list_entry(kthread_create_list.next,
+                        struct kthread_create_info, list);
+            list_del_init(&create->list);
+            spin_unlock(&kthread_create_lock);
+ 
+            create_kthread(create);
+ 
+            spin_lock(&kthread_create_lock);
+        }
+        spin_unlock(&kthread_create_lock);
+    }
+ 
+    return 0;
 }
 ```
