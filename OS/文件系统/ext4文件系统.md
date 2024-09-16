@@ -256,6 +256,28 @@ struct ext4_dir_entry {
 };
 ```
 
+### 特殊的 inode 结构
+
+0. 不存在0号inode
+
+1. 损坏数据块链表
+
+2. 根目录
+
+3. ACL索引
+
+4. ACL数据
+
+5. Bootloader
+
+6. 未删除的目录
+
+7. 预留的块组描述符inode
+
+8. 日志inode
+
+9. 11 号第一个非预留的inode，通常是lost+found目录
+
 ## extents 索引
 
 Ext4引入了一个新的概念，叫做“Extents”。一个Extents是一个地址连续的数据块(block)的集合。比如一个100MB的文件有可能被分配给一个单独的Extents，这样就不用像Ext3那样新增25600个数据块的记录（一个数据块是4KB）。而超大型文件会被分解在多个extents里。
@@ -507,9 +529,423 @@ ext4_ext_binsearch_idx(struct inode *inode,
 
 为了防止磁盘碎片的产生，ext4中引入了一些防范机制
 
-### mballoc多块分配器
-
 * 采取buddy算法管理每个block group
 * 采用prellocation机制，分为per-cpu local preallocation（小文件）和per inode preallocation（大文件）
 * block分配时，会比请求的分配数量更多，多余的空间会放入preallocation space，这样给write多留些空间，避免concurrent write时候碎片化
 * 计算目标goal phsycial block，尽量保持块分配的连续性
+
+### 预分配
+
+预分配的入口函数 `ext4_fallocate` 该函数被注册到 i_op 中，用于实现 fallocate 系统调用。
+
+```c
+long ext4_fallocate(struct inode *inode, int mode, loff_t offset, loff_t len)
+{
+	handle_t *handle; // 文件系统事务的句柄
+	ext4_lblk_t block; // 逻辑块号
+	loff_t new_size; // 文件的新的大小
+	unsigned int max_blocks; // 需要分配的最大块数
+	int ret = 0; // 返回值，表示操作状态
+	int ret2 = 0; // 第二个返回值，用于记录事务结束时的状态
+	int retries = 0; // 重试计数器
+	struct buffer_head map_bh; // 缓存块映射信息
+	unsigned int credits, blkbits = inode->i_blkbits; // 事务所需的元数据块数和块大小（以位表示）
+
+	/*
+	 * 仅支持基于 extent 的文件进行（预）分配
+	 */
+	if (!(EXT4_I(inode)->i_flags & EXT4_EXTENTS_FL))
+		return -EOPNOTSUPP; // 如果文件不支持 extent，则返回不支持错误
+
+	/* 不支持对目录进行预分配 */
+	if (S_ISDIR(inode->i_mode))
+		return -ENODEV; // 如果是目录，返回不支持的设备错误
+
+	// 计算从偏移量开始的第一个逻辑块号
+	block = offset >> blkbits;
+	/*
+	 * 不能直接将 len 转换为 max_blocks，因为块大小和偏移量不对齐的情况需要处理。
+	 * 比如，块大小为 4096 字节，偏移量为 3072 字节，而长度为 2048 字节时，
+	 * 会跨越两个块。
+	 */
+	max_blocks = (EXT4_BLOCK_ALIGN(len + offset, blkbits) >> blkbits) - block;
+	/*
+	 * 计算插入一个 extent 到 extent 树所需的元数据块数
+	 */
+	credits = ext4_chunk_trans_blocks(inode, max_blocks);
+	mutex_lock(&inode->i_mutex); // 锁定 inode，避免多线程冲突
+retry: // 重试标签，如果出现错误如 ENOSPC，会跳回此处重试
+	while (ret >= 0 && ret < max_blocks) {
+		// 每次分配后更新块号和剩余要分配的块数
+		block = block + ret;
+		max_blocks = max_blocks - ret;
+
+		// 启动一个新的事务，分配所需的元数据块数
+		handle = ext4_journal_start(inode, credits);
+		if (IS_ERR(handle)) {
+			// 如果事务启动失败，返回错误
+			ret = PTR_ERR(handle);
+			break;
+		}
+
+		map_bh.b_state = 0; // 重置缓冲块的状态
+		// 获取块映射信息，可能创建未初始化的 extent
+		ret = ext4_get_blocks(handle, inode, block,
+				      max_blocks, &map_bh,
+				      EXT4_GET_BLOCKS_CREATE_UNINIT_EXT);
+		if (ret <= 0) {
+#ifdef EXT4FS_DEBUG
+			// 在调试模式下打印错误日志
+			WARN_ON(ret <= 0);
+			printk(KERN_ERR "%s: ext4_ext_get_blocks "
+				    "returned error inode#%lu, block=%u, "
+				    "max_blocks=%u", __func__,
+				    inode->i_ino, block, max_blocks);
+#endif
+			// 如果发生错误，标记 inode 为脏并停止事务
+			ext4_mark_inode_dirty(handle, inode);
+			ret2 = ext4_journal_stop(handle);
+			break;
+		}
+
+		// 检查是否已经分配足够的块来覆盖指定的偏移量和长度
+		if ((block + ret) >= (EXT4_BLOCK_ALIGN(offset + len, blkbits) >> blkbits))
+			new_size = offset + len; // 计算新文件大小
+		else
+			new_size = (block + ret) << blkbits; // 否则根据块大小更新文件大小
+
+		// 更新 inode 的大小信息以及是否分配了新块
+		ext4_falloc_update_inode(inode, mode, new_size, buffer_new(&map_bh));
+		// 标记 inode 为脏，表示它已被修改
+		ext4_mark_inode_dirty(handle, inode);
+
+		// 停止事务
+		ret2 = ext4_journal_stop(handle);
+		if (ret2)
+			break; // 如果停止事务时出错，退出循环
+	}
+
+	// 如果遇到空间不足的错误，并且可以重试，进行重试
+	if (ret == -ENOSPC &&
+			ext4_should_retry_alloc(inode->i_sb, &retries)) {
+		ret = 0; // 重置返回值
+		goto retry; // 跳转到 retry 标签重新执行分配
+	}
+
+	mutex_unlock(&inode->i_mutex); // 解锁 inode
+	// 返回最终的结果，成功则返回 ret2，否则返回 ret
+	return ret > 0 ? ret2 : ret;
+}
+```
+
+### mballoc多块分配器
+
+在 mballoc 多块分配器中采用了伙伴系统的算法，一次可以分配多个连续的块。相比于传统的一次只分配一个块可以使文件在磁盘上的排布尽量连续。
+
+入口函数：
+
+```c
+ext4_mb_new_blocks
+```
+
+在两种情况下会调用 ext4_mb_new_blocks 函数进行块分配
+
+1. 分配直接块
+
+   在这种情况下又可以分为多级索引与 extent 。对于多级索引通过`ext4_alloc_blocks`调用mballoc的入口，对于extent则通过 `ext4_ext_get_blocks`调用mballoc的入口。
+
+2. 分配索引块
+
+   在这种情况下，会通过函数 `ext4_new_meta_blocks`来调用ext4_mb_new_blocks
+
+#### mballoc
+
+在 mballoc 在中使用 `ext4_allocation_context` 结构来追踪块分配的情况。
+
+```c
+// 定义了分配上下文，跟踪分配过程中的状态和结果
+struct ext4_allocation_context {
+    struct inode *ac_inode;           // 关联的 inode 指针
+    struct super_block *ac_sb;        // 超级块指针
+
+    struct ext4_free_extent ac_o_ex;  // 原始请求的自由块区
+    struct ext4_free_extent ac_g_ex;  // 标准化后的目标自由块区
+    struct ext4_free_extent ac_b_ex;  // 最佳找到的自由块区
+    struct ext4_free_extent ac_f_ex;  // 预分配前找到的最佳自由块区的副本
+
+    unsigned long ac_ex_scanned;      // 已扫描的块数
+    __u16 ac_groups_scanned;          // 已扫描的块组数
+    __u16 ac_found;                   // 找到的自由块数
+    __u16 ac_tail;                    // 用于跟踪末尾块的字段
+    __u16 ac_buddy;                   // 用于伙伴系统的字段
+    __u16 ac_flags;                   // 分配提示标志
+    __u8 ac_status;                   // 分配状态
+    __u8 ac_criteria;                 // 分配标准
+    __u8 ac_repeats;                  // 重复计数
+    __u8 ac_2order;                   // 如果请求分配 2^N 个块，且 N > 0，此字段存储 N，否则为 0
+    __u8 ac_op;                       // 操作类型，仅用于历史记录
+
+    struct page *ac_bitmap_page;      // 位图页面指针
+    struct page *ac_buddy_page;       // 伙伴页面指针
+    struct rw_semaphore *alloc_semp;  // 成功分配后持有的信号量指针
+    struct ext4_prealloc_space *ac_pa;  // 预分配空间指针
+    struct ext4_locality_group *ac_lg;  // 本地性组指针
+};
+```
+
+ext4_allocation_request 结构用于记录函数
+
+```c
+struct ext4_allocation_request {
+	/* 我们要为其分配块的目标 inode */
+	struct inode *inode;
+
+	/* 我们希望分配的块数 */
+	unsigned int len;
+
+	/* 目标 inode 中的逻辑块号（正在分配的块） */
+	ext4_lblk_t logical;
+
+	/* 与目标块相邻的最近的已分配块的逻辑块号（左侧） */
+	ext4_lblk_t lleft;
+
+	/* 与目标块相邻的最近的已分配块的逻辑块号（右侧） */
+	ext4_lblk_t lright;
+
+	/* 物理目标块号（一个提示，指向期望的块号位置） */
+	ext4_fsblk_t goal;
+
+	/* 与目标块相邻的最近的已分配块的物理块号（左侧） */
+	ext4_fsblk_t pleft;
+
+	/* 与目标块相邻的最近的已分配块的物理块号（右侧） */
+	ext4_fsblk_t pright;
+
+	/* 分配的标志，参见 EXT4_MB_HINT_* */
+	unsigned int flags;
+};
+```
+
+### 延迟分配
+
+在延迟分配中使用 mpage_da_data 结构来追踪延迟分配。
+
+```c
+struct mpage_da_data {
+	struct inode *inode;
+	sector_t b_blocknr;		/* start block number of extent */
+	size_t b_size;			/* size of extent */
+	unsigned long b_state;		/* state of the extent */
+	unsigned long first_page, next_page;	/* extent of pages */
+	struct writeback_control *wbc;
+	int io_done;
+	int pages_written;
+	int retval;
+};
+```
+
+* @inode: 文件所在的 inode 指针
+* @b_blocknr: 当前块区间（extent）的起始块号
+* @b_size: 当前块区间的大小，表示有多少块属于同一个连续区间
+* @b_state: 当前块区间的状态标志，用于标记块的状态（如是否延迟分配、未写入等）
+* @first_page: 当前块区间所包含的第一个页面的索引
+* @next_page: 下一个页面的索引，用于扩展块区间或判断是否需要开始新的区间
+* @wbc: 用于写回操作的控制结构指针，包含写回操作的参数和控制信息
+* @io_done: 标志位，用于指示是否已完成当前的 I/O 操作（0表示未完成，1表示已完成）
+* @pages_written: 跟踪已写入的页面数
+* @retval: 保存写回操作的返回值或错误码
+
+#### 设置延迟分配标志
+
+延迟分配的标识的设置在执行向页缓存中写入数据时发生。在函数 `generic_perform_write` 中会调用 `a_ops->write_begin` 。该指针在ext4文件系统中指向函数 `ext4_da_write_begin`
+
+![Alt text](../image/延迟分配的标记.png)
+
+#### 真正的分配
+
+在磁盘回写的过程中，会调用到 `writepages` 函数。该函数在ext4中被注册为 `ext4_da_writepages`。
+
+在 `ext4_da_writepages` 中，通过 `__mpage_da_writepage` 函数扫描extent结构，并尝试将页面合并到当前的extent中。
+
+在执行 `__mpage_da_writepage` 之后则通过函数 `mpage_add_bh_to_extent` 还未分配块的页面进行分配。而该函数最终会向 mballoc 多块分配器请求连续的块。
+
+下图为对页面的操作。对于 buffer_head 的操作也是这样，只不过将 first_page 与 next_page 成员替换为了成员 b_size b_blocknr
+
+![Alt text](../image/__mpage_da_writepage.png)
+
+```c
+static int __mpage_da_writepage(struct page *page,
+				struct writeback_control *wbc, void *data)
+{
+	struct mpage_da_data *mpd = data;  // 从 data 中获取 mpage_da_data 结构
+	struct inode *inode = mpd->inode;  // 获取与该数据相关联的 inode
+	struct buffer_head *bh, *head;  // 定义缓冲头指针
+	sector_t logical;  // 逻辑块号
+
+	// 如果已完成 I/O 操作
+	if (mpd->io_done) {
+		/*
+		 * 对于 page_vec 中剩余的页面，将它们重新标记为脏页，并跳过。
+		 * 在启动新事务后，我们会再次尝试写入它们。
+		 */
+		redirty_page_for_writepage(wbc, page);  // 重新标记页面为脏页
+		unlock_page(page);  // 解锁页面
+		return MPAGE_DA_EXTENT_TAIL;  // 返回处理完成的状态
+	}
+
+	/*
+	 * 我们是否可以将此页面合并到当前扩展中？
+	 */
+	if (mpd->next_page != page->index) {  // 如果当前页面和上一组页面不连续，因此不能合并到扩展
+		/*
+		 * 不能合并。我们将映射未分配的块，并通过 writepage() 启动它们的 I/O。
+		 */
+		if (mpd->next_page != mpd->first_page) {//说明并不是一个新开始的区间
+			// 映射数据块并提交 I/O
+			if (mpage_da_map_blocks(mpd) == 0)
+				mpage_da_submit_io(mpd);
+			/*
+			 * 跳过 page_vec 中剩余的页面
+			 */
+			mpd->io_done = 1;  // 标记 I/O 操作完成
+			redirty_page_for_writepage(wbc, page);  // 重新标记页面为脏页
+			unlock_page(page);  // 解锁页面
+			return MPAGE_DA_EXTENT_TAIL;  // 返回处理完成状态
+		}
+
+		/*
+		 * 开始新的页面扩展...
+		 */
+		mpd->first_page = page->index;  // 更新 first_page 为当前页面的索引
+
+		/*
+		 * ...以及块的扩展
+		 */
+		mpd->b_size = 0;  // 重置块大小
+		mpd->b_state = 0;  // 重置块状态
+		mpd->b_blocknr = 0;  // 重置块号
+	}
+
+	// 更新下一个页面的索引
+	mpd->next_page = page->index + 1;
+	// 计算逻辑块号
+	logical = (sector_t) page->index << (PAGE_CACHE_SHIFT - inode->i_blkbits);
+
+	// 如果页面没有 buffer
+	if (!page_has_buffers(page)) {
+		// 将当前页面添加到扩展中
+		mpage_add_bh_to_extent(mpd, logical, PAGE_CACHE_SIZE,
+				       (1 << BH_Dirty) | (1 << BH_Uptodate));
+		// 如果 I/O 操作已完成，返回处理完成状态
+		if (mpd->io_done)
+			return MPAGE_DA_EXTENT_TAIL;
+	} else {
+		/*
+		 * 处理具有常规缓冲头的页面，只添加所有脏缓冲头。
+		 */
+		head = page_buffers(page);  // 获取页面的缓冲头链表
+		bh = head;
+		do {
+			BUG_ON(buffer_locked(bh));  // 确保缓冲头未被锁定
+			/*
+			 * 我们需要尝试分配页面中未映射的块。
+			 * 否则，在 ext4_writepage 中该页面将无法继续处理。
+			 */
+			if (ext4_bh_delay_or_unwritten(NULL, bh)) {
+				// 将缓冲头添加到扩展中
+				mpage_add_bh_to_extent(mpd, logical,
+						       bh->b_size,
+						       bh->b_state);
+				// 如果 I/O 操作已完成，返回处理完成状态
+				if (mpd->io_done)
+					return MPAGE_DA_EXTENT_TAIL;
+			} else if (buffer_dirty(bh) && buffer_mapped(bh)) {
+				/*
+				 * 映射的脏缓冲头。我们需要更新 b_state，
+				 * 因为我们在 mpage_da_map_blocks 中会检查 b_state。
+				 * 我们不更新 b_size，因为如果稍后找到未映射的 buffer_head，
+				 * 我们需要使用该 buffer_head 的 b_state 标志。
+				 */
+				if (mpd->b_size == 0)
+					mpd->b_state = bh->b_state & BH_FLAGS;  // 更新块状态
+			}
+			logical++;  // 更新逻辑块号
+		} while ((bh = bh->b_this_page) != head);  // 遍历页面的所有缓冲头
+	}
+
+	return 0;  // 返回成功状态
+}
+```
+
+同时在 mpage_add_bh_to_extent 函数中，若bufhead对应的缓存块大小大于extent所支持的最大大小或者 当前bufhead与上一个bufhead并不连续，也会调用 mpage_da_map_blocks 与 mpage_da_submit_io 进行分配新 extent 与提交 extent 的操作。
+
+```c
+/*
+ * mpage_add_bh_to_extent - 尝试将一个块添加到块的扩展范围中
+ *
+ * @mpd->lbh - 块的扩展范围
+ * @logical - 文件中块的逻辑编号
+ * @bh - 块的缓冲头（用于访问块的状态）
+ *
+ * 该函数用于收集相同状态的连续块。
+ */
+static void mpage_add_bh_to_extent(struct mpage_da_data *mpd,
+				   sector_t logical, size_t b_size,
+				   unsigned long b_state)
+{
+	sector_t next;  // 下一个逻辑块号
+	int nrblocks = mpd->b_size >> mpd->inode->i_blkbits;  // 计算当前扩展中的块数
+
+	/* 检查保留的日志凭证是否可能溢出 */
+	if (!(EXT4_I(mpd->inode)->i_flags & EXT4_EXTENTS_FL)) {  // 如果 inode 不使用扩展格式
+		// 如果当前块数超过最大可支持的事务数据量
+		if (nrblocks >= EXT4_MAX_TRANS_DATA) {
+			/*
+			 * 对于非扩展格式，受限于可用的日志凭证。
+			 * 插入 nrblocks 个连续块所需的总凭证取决于块数。
+			 * 因此，限制块数。
+			 */
+			goto flush_it;  // 无法继续合并，进入刷新流程
+		} else if ((nrblocks + (b_size >> mpd->inode->i_blkbits)) >
+				EXT4_MAX_TRANS_DATA) {
+			/*
+			 * 添加新的缓冲头会超出为其保留的日志凭证上限。
+			 * 因此，限制新缓冲头的大小。
+			 */
+			b_size = (EXT4_MAX_TRANS_DATA - nrblocks) <<
+						mpd->inode->i_blkbits;  // 限制缓冲头大小
+			/* 在下一轮循环中调用 mpage_da_submit_io 提交 I/O */
+		}
+	}
+
+	/*
+	 * 扩展的第一个块
+	 */
+	if (mpd->b_size == 0) {  // 如果这是扩展中的第一个块
+		mpd->b_blocknr = logical;  // 设置扩展的起始块号
+		mpd->b_size = b_size;  // 设置扩展的大小
+		mpd->b_state = b_state & BH_FLAGS;  // 设置扩展的状态
+		return;
+	}
+
+	next = mpd->b_blocknr + nrblocks;  // 计算下一个逻辑块号
+	/*
+	 * 我们能将这个块合并到当前的扩展中吗？
+	 */
+	if (logical == next && (b_state & BH_FLAGS) == mpd->b_state) {  // 如果该块可以合并
+		mpd->b_size += b_size;  // 增加扩展的大小
+		return;
+	}
+
+flush_it:
+	/*
+	 * 无法将该块合并到扩展中，因此需要刷新当前扩展并开始新的扩展。
+	 */
+	if (mpage_da_map_blocks(mpd) == 0)  // 将块映射到扩展中
+		mpage_da_submit_io(mpd);  // 提交 I/O 操作
+	mpd->io_done = 1;  // 标记 I/O 操作完成
+	return;
+}
+```
+
+![Alt text](../image/%E5%9D%97%E5%90%88%E5%B9%B6.png)
