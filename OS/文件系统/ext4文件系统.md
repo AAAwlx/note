@@ -375,7 +375,7 @@ extent 机制下通过逻辑块号寻找一个物理块，入口函数为 `ext4_
 
 其中逻辑块号是指在一个数据块在文件中的偏移。extent 项按照逻辑块号即`ext4_extent_idx->ei_block` 从小到大在数组中排布。
 
-![Alt text](extent_tree.png)
+![Alt text](../image/extent_tree.png)
 
 ```c
 /*
