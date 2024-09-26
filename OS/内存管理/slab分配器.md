@@ -8,6 +8,8 @@ slab分配器有以下三个基本目标：
 
 ## slab 分配器中用到的结构体
 
+![Alt text](../image/slba分配器中的数据结构.png)
+
 ### 核心数据结构kmem_cache
 
 slba分配器中的kmem_cache
@@ -59,11 +61,17 @@ struct kmem_cache {
 };
 ```
 
+内核中的 `kmem_cache` 结构都被记录在 cache_chain 链表中。
+
+```c
+static struct list_head cache_chain;//用来维护所有 kmem_cache 实例（缓存池）的链表
+```
+
 在一个 `kmem_cache` 结构中，有两个较为重要的成员，分别为cpu的缓存信息 `array` 与 slab 节点 `nodelists`
 
 ### 记录cpu缓存信息的结构array_cache
 
-struct array_cache *array[NR_CPUS]：
+为了提升效率，SLAB分配器为每一个CPU都提供了每CPU数据结构struct array_cache，该结构指向被释放的对象。当CPU需要使用申请某一个对象的内存空间时，会先检查array_cache中是否有空闲的对象，如果有的话就直接使用。如果没有空闲对象，就像SLAB分配器进行申请。
 
 ```c
 struct array_cache {
@@ -114,7 +122,7 @@ struct kmem_list3 {
 };
 ```
 
-kmem_list3 记录了3种slab：
+kmem_list3中有三个链表slabs_partial、slabs_full、slabs_free
 
 * slabs_full ：已经完全分配的 slab
 * slabs_partial： 部分分配的slab
@@ -152,5 +160,110 @@ struct page {
 }
 ```
 
-freelist指向的是slab空闲obj的索引数组，该数组要和slab描述符中的active成员搭配使用。freelist指向的区域是一个连续地址的数组，它保存的地方有两种情况：一种情况是放在slab自身所在的内存区域，另外一种情况是保存在slab所在内存区域的外部(若保存在slab外部，则保存在slab对应slab cache的kmem_cache结构体中freelist_cache成员指针指向的链表).
+freelist指向的是slab空闲obj的索引数组，该数组要和slab描述符中的active成员搭配使用。freelist指向的区域是一个连续地址的数组，它保存的地方有两种情况：一种情况是放在slab自身所在的内存区域，另外一种情况是保存在slab所在内存区域的外部(若保存在slab外部，则保存在slab对应slab cache的kmem_cache结构体中freelist_cache成员指针指向的链表)。在 2.6 版本中 page 结构中并无 `void *s_mem` 成员。该成员在 slab 结构中。
 
+slab主要包含两大部分，管理性数据和obj对象，其中管理性数据包括struct slab和kmem_bufctl_t。slab有两种形式的结构，管理数据外挂式或内嵌式。如果obj比较小，那么struct slab和kmem_bufctl_t可以和obj分配在同一个物理page中，可称为内嵌式；如果obj比较大，那么管理性数据需要单独分配一块内存来存放，称之为外挂式。我们在上图中所画的slab结构为内嵌式。
+
+```c
+struct slab {
+	struct list_head list;		// 满、部分满或空链表
+	unsigned long colouroff;	// slab着色的偏移量
+	// 在slab中的第一个对象
+	void *s_mem;		/* including colour offset */		/* 包括颜色偏移的内存指针，指向 slab 的第一个对象 */
+	// slab中已分配的对象数
+	unsigned int inuse;	/* num of objs active in slab */
+	// 第一个空闲对象（如果有的话）
+	kmem_bufctl_t free;
+	unsigned short nodeid;	/* 所属 NUMA 节点的 ID */
+};
+```
+
+## 普通高速缓存和专用高速缓存
+
+高速缓存被分为普通和专用两种，普通高速缓存只由 slab 分配器用于自己的目的，而专用高速缓存由内核的其余部分使用。这两种类型的 slab 分配器均在 kmem_cache_init 中被初始化。
+
+`cache_cache` 结构用于 slab 分配器自身的内存分配。
+
+```c
+/* internal cache of cache description objs */
+static struct kmem_cache cache_cache = {
+	.batchcount = 1,
+	.limit = BOOT_CPUCACHE_ENTRIES,
+	.shared = 1,
+	.buffer_size = sizeof(struct kmem_cache),
+	.name = "kmem_cache",
+};
+```
+
+初始化 `cache_cache`：
+
+```c
+// 初始化初始的 slab 列表
+	for (i = 0; i < NUM_INIT_LISTS; i++) {
+		kmem_list3_init(&initkmem_list3[i]);
+		if (i < MAX_NUMNODES)
+			cache_cache.nodelists[i] = NULL;
+	}
+	set_up_list3s(&cache_cache, CACHE_CACHE);
+
+	// 如果总的内存超过32MB，设置slab分配器使用的页数更大，以减少碎片化
+	if (totalram_pages > (32 << 20) >> PAGE_SHIFT)
+		slab_break_gfp_order = BREAK_GFP_ORDER_HI;
+
+	// 第一步: 创建缓存，用于管理 kmem_cache 结构
+	node = numa_node_id();  // 获取当前 NUMA 节点的 ID
+
+	// 初始化 cache_cache，管理所有缓存描述符
+	INIT_LIST_HEAD(&cache_chain);  // 初始化 cache_chain 列表
+	list_add(&cache_cache.next, &cache_chain);  // 将 cache_cache 加入链表
+	cache_cache.colour_off = cache_line_size();  // 设置 cache 的颜色偏移量
+	cache_cache.array[smp_processor_id()] = &initarray_cache.cache;  // 设置 per-CPU 缓存
+	cache_cache.nodelists[node] = &initkmem_list3[CACHE_CACHE + node];  // 设置节点列表
+
+	// 设置 cache_cache 的大小，确保它对齐缓存行
+	cache_cache.buffer_size = offsetof(struct kmem_cache, nodelists) +
+				 nr_node_ids * sizeof(struct kmem_list3 *);
+	cache_cache.buffer_size = ALIGN(cache_cache.buffer_size,
+					cache_line_size());
+	cache_cache.reciprocal_buffer_size =
+		reciprocal_value(cache_cache.buffer_size);
+
+	// 估算缓存大小，确保有足够的空间来存放对象
+	for (order = 0; order < MAX_ORDER; order++) {
+		cache_estimate(order, cache_cache.buffer_size,
+			cache_line_size(), 0, &left_over, &cache_cache.num);
+		if (cache_cache.num)
+			break;
+	}
+	BUG_ON(!cache_cache.num);  // 如果计算失败，触发 BUG
+	cache_cache.gfporder = order;  // 设置缓存使用的页面顺序
+	cache_cache.colour = left_over / cache_cache.colour_off;  // 设置缓存颜色
+	cache_cache.slab_size = ALIGN(cache_cache.num * sizeof(kmem_bufctl_t) +
+				      sizeof(struct slab), cache_line_size());  // 设置 slab 大小
+```
+
+内存范围一般包括 13 个几何分布的内存区，大小分别为 32、64、128、256、512、1024、2048、4096、8192、16384、32768、65536 和 131072 字节。 malloc_size 数组的元素指向 26 个高速缓存描述符，因为每个内存区都包含两个高速缓存，一个用于 ISA DMA 分配，另一个用于常规分配。
+
+```c
+struct cache_sizes malloc_sizes[] = {
+#define CACHE(x) { .cs_size = (x) },
+#include <linux/kmalloc_sizes.h>
+	CACHE(ULONG_MAX)
+#undef CACHE
+};
+EXPORT_SYMBOL(malloc_sizes);
+```
+
+初始化 `malloc_sizes` ：
+
+```c
+sizes[INDEX_AC].cs_cachep = kmem_cache_create(names[INDEX_AC].name,
+					sizes[INDEX_AC].cs_size,
+					ARCH_KMALLOC_MINALIGN,
+					ARCH_KMALLOC_FLAGS|SLAB_PANIC,
+					NULL);
+```
+
+## 创建一个缓存
+
+当 不足时会调用cache_grow，在该函数中会调用函数kmem_getpages 向伙伴系统请求页面

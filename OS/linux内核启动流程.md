@@ -113,6 +113,8 @@ asmlinkage void decompress_kernel(void *rmode, memptr heap,
 	calll	main
 ```
 
+main 函数的主要作用是初始化和设置系统环境，为加载并运行操作系统内核做准备。它通常用于引导加载程序或启动程序的早期阶段，在系统启动时负责硬件检测、CPU 和内存的初始化、设置视频模式、处理命令行参数等一系列操作，最终进入保护模式，转交给操作系统内核
+
 ```c
 void main(void)
 {
