@@ -19,7 +19,7 @@
 
 ## ext4 中的数据结构
 
-### ext4_super_block
+### ext4_super_block 超级块
 
 `struct ext4_super_block`为ext4文件系统原生的超级块结构。在 ext4_super_block 中存储了ext4 文件系统的元信息。在ext4被挂载时会将该结构从磁盘中读取，并将其中内容填入到 `ext4_sb_info` 中。ext4_sb_info 会作为vfs层中 super_block 结构在ext4文件系统中的子类。
 
@@ -127,7 +127,7 @@ static inline struct ext4_sb_info *EXT4_SB(struct super_block *sb)
 }
 ```
 
-### ext4_group_desc
+### ext4_group_desc 块组描述符
 
 `struct ext4_group_desc` 为ext4文件系统中的块组描述符，该结构被记录在块组描述符表，即 GDT 区域中。
 
@@ -243,7 +243,7 @@ static inline struct ext4_inode_info *EXT4_I(struct inode *inode)
 }
 ```
 
-### ext4_dir_entry
+### ext4_dir_entry 目录项
 
 `ext4_dir_entry` 结构为ext4文件系统原生的目录项结构。该结构中的内容会被填写转移到 vfs 层中的 dentry 中。
 
