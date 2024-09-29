@@ -658,7 +658,7 @@ ext4_mb_new_blocks
 
    在这种情况下，会通过函数 `ext4_new_meta_blocks`来调用ext4_mb_new_blocks
 
-#### mballoc
+#### mballoc 用到的结构体
 
 在 mballoc 在中使用 `ext4_allocation_context` 结构来追踪块分配的情况。
 
@@ -724,6 +724,36 @@ struct ext4_allocation_request {
 	/* 分配的标志，参见 EXT4_MB_HINT_* */
 	unsigned int flags;
 };
+```
+
+#### 多块分配器的分配流程
+
+多块分配器入口函数为 `ext4_mb_new_blocks`
+
+在ext4_mb_new_blocks中被调用的函数：
+
+```c
+ext4_mb_initialize_context();//初始化分配上下文
+ext4_mb_regular_allocator();//正式的分配块
+if (ac->ac_status == AC_STATUS_FOUND && ac->ac_o_ex.fe_len < ac->ac_b_ex.fe_len)
+	ext4_mb_new_preallocation(ac);  // 创建新的预分配块
+//分配成功后
+ext4_mb_mark_diskspace_used()//标记使用的磁盘空间
+```
+
+**初始化伙伴系统**
+
+在为文件分配一个新块时，会检查文件所对应的块组有没有被初始化。如果块组没有被初始化，就会ext4调用ext4_mb_init_group()函数对buddy系统进行初始化：
+
+```c
+ext4_mb_regular_allocator  ext4_mb_load_buddy ext4_mb_init_group
+```
+
+
+在ext4_mb_new_blocks()函数，当采用常规的分配方式分配成功后，如果所分得的长度大于最初要求分配的长度，那么多余出来的这部分空间就可以用来预分配
+
+```c
+
 ```
 
 ### 延迟分配
