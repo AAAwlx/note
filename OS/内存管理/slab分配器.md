@@ -138,12 +138,13 @@ page中与slab分配器相关的地方：
 
 一个页，要么位于空闲链表中，要么用于作为映射页，要么在slab分配器中。
 
+当 page 属于 slab 时，page->lru.next 指向 page 驻留的的缓存的管理结构，page->lru.prec 指向保存该page 的 slab 的管理结构。ji
+
 ```c
 //为了节省内存，struct page中许多结构体会通过union联合体进行封装，此处做了省略
 struct page {
     //当页描述符成员flage标志设置了PG_SLAB后,struct page中对应的slab成员才有效
 	unsigned long flags;
-	void *s_mem;
     //freelist实际上是一个数组，数组中存放slab中未使用的obj的index值
 	void *freelist;		/* sl[aou]b first free object */
 		/* page_deferred_list().prev	-- second tail page */
@@ -160,7 +161,9 @@ struct page {
 }
 ```
 
-freelist指向的是slab空闲obj的索引数组，该数组要和slab描述符中的active成员搭配使用。freelist指向的区域是一个连续地址的数组，它保存的地方有两种情况：一种情况是放在slab自身所在的内存区域，另外一种情况是保存在slab所在内存区域的外部(若保存在slab外部，则保存在slab对应slab cache的kmem_cache结构体中freelist_cache成员指针指向的链表)。在 2.6 版本中 page 结构中并无 `void *s_mem` 成员。该成员在 slab 结构中。
+### slab结构
+
+freelist指向的是 slab 空闲 obj 的索引数组，该数组要和 active 成员搭配使用。freelist 指向的区域是一个连续地址的数组，它保存的地方有两种情况：一种情况是放在 slab 自身所在的内存区域，另外一种情况是保存在 slab 所在内存区域的外部(若保存在slab外部，则保存在slab对应slab cache的kmem_cache结构体中 freelist_cache 成员指针指向的链表)。在 2.6 版本中 page 结构中并无 `void *s_mem` 成员。该成员在 slab 结构中。
 
 slab主要包含两大部分，管理性数据和obj对象，其中管理性数据包括struct slab和kmem_bufctl_t。slab有两种形式的结构，管理数据外挂式或内嵌式。如果obj比较小，那么struct slab和kmem_bufctl_t可以和obj分配在同一个物理page中，可称为内嵌式；如果obj比较大，那么管理性数据需要单独分配一块内存来存放，称之为外挂式。我们在上图中所画的slab结构为内嵌式。
 
@@ -266,4 +269,92 @@ sizes[INDEX_AC].cs_cachep = kmem_cache_create(names[INDEX_AC].name,
 
 ## 创建一个缓存
 
-当 不足时会调用cache_grow，在该函数中会调用函数kmem_getpages 向伙伴系统请求页面
+创建缓存的入口为 `kmem_cache_create`
+
+```c
+struct kmem_cache *kmem_cache_create (const char *name, size_t size, size_t align,unsigned long flags, void (*ctor)(void *)) 
+```
+
+* 第一个参数是字符串，存放高速缓存的名字
+* 第二个参数是高速缓存中每个元素的大小，
+* 第三个参数是slab内第一个对象的偏移，用来确保在页内进行特定的对齐。通常0就可以满足，也就是标准对齐。
+* flags参数是可选的设置项，用来控制高速缓存的行为。可以为0,表示没有特殊行为，或者与以下标志进行或运算，在slab.h中存在定义。
+* 最后一个参数是函数指针，用来定义该缓存被分配时的初始化方式，类似于cpp中的构造函数。
+
+在创建一个缓存时，首先会遍历 `cache_chain` 链表，查看是否有同名的缓存。在没有同名缓存的情况下再对各种对齐参数进行计算。
+
+然后为缓存管理结构 kmem_cache 分配一块内存。
+
+分配好 kmem_cache 后会使用 `calculate_slab_order` 寻找适合的 slab 页阶数
+
+```c
+static size_t calculate_slab_order(struct kmem_cache *cachep,
+			size_t size, size_t align, unsigned long flags)
+{
+	unsigned long offslab_limit;  // 用于确定 off-slab 缓存的限制
+	size_t left_over = 0;         // 剩余的碎片大小
+	int gfporder;                 // 用于 slab 分配的页数的阶数
+
+	// 循环遍历不同阶数的页分配，直到找到合适的 slab 配置
+	for (gfporder = 0; gfporder <= KMALLOC_MAX_ORDER; gfporder++) {
+		unsigned int num;   // 当前阶数下可分配的对象数量
+		size_t remainder;   // 当前阶数下的剩余碎片空间
+
+		// 估算当前阶数下 slab 中的对象数和剩余碎片
+		cache_estimate(gfporder, size, align, flags, &remainder, &num);
+		
+		// 如果没有可分配的对象，继续尝试下一个阶数
+		if (!num)
+			continue;
+
+		// 如果使用 off-slab 缓存方式，计算最大允许的对象数
+		if (flags & CFLGS_OFF_SLAB) {
+			/*
+			 * 使用 off-slab slab 的缓存对象数上限。
+			 * 避免在 cache_grow() 中出现无限循环的情况。
+			 */
+			offslab_limit = size - sizeof(struct slab);
+			offslab_limit /= sizeof(kmem_bufctl_t);
+
+			// 如果对象数超出 off-slab 限制，跳出循环
+			if (num > offslab_limit)
+				break;
+		}
+
+		// 找到符合要求的配置，记录可分配对象数和阶数
+		cachep->num = num;
+		cachep->gfporder = gfporder;
+		left_over = remainder;  // 记录当前阶数下的剩余碎片
+
+		/*
+		 * 对于 VFS 可回收的 slab，大多数分配是使用 GFP_NOFS，
+		 * 我们不希望在无法缩小 dcache 时分配更高阶的页。
+		 */
+		if (flags & SLAB_RECLAIM_ACCOUNT)
+			break;
+
+		/*
+		 * 虽然对象数越多越好，但非常大的 slab 对 gfp() 调用
+		 * 会带来不利影响，因此我们限制 gfporder。
+		 */
+		if (gfporder >= slab_break_gfp_order)
+			break;
+
+		/*
+		 * 判断内部碎片是否可以接受。如果剩余碎片占的比例较小，
+		 * 则认为该配置是合适的，终止循环。
+		 */
+		if (left_over * 8 <= (PAGE_SIZE << gfporder))
+			break;
+	}
+	
+	// 返回最后的剩余碎片大小
+	return left_over;
+}
+```
+
+在函数 cache_estimate 中会将一个
+
+## 分配一个缓存
+
+当 不足时会调用cache_grow，在该函数中会调用函数 kmem_getpages 向伙伴系统请求页面。
