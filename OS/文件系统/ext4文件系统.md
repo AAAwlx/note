@@ -658,6 +658,14 @@ ext4_mb_new_blocks
 
    在这种情况下，会通过函数 `ext4_new_meta_blocks`来调用ext4_mb_new_blocks
 
+在多块分配器中会将 block bitmap 重新整理为 buddy bitmap 。
+
+通常情况下block bitmap 和 buddy bitmap 的大小都是4k，对于block bitmap来说，4k的空间有32768个bit位，而每一个bit位代表一个block块（4k）的使用情况(1为占用，0为空闲)，因此能表示128M的空间。
+
+buddy bitmap 首先拿出这32768个bit位的前一半，也就是0-16383，这些bit位每一个bit位表示连续的两个(21)block的空闲情况；然后再从剩下的一半bit中拿出一半的bit来表示连续4个(22)block的使用情况；接着再从剩下的一半bit位里面拿出一半来表示连续8个(23)block的使用情况......依次类推，最终可以表示4个213个block的使用情况。
+
+只有一个单独的块的则直接被记录在 `bb_counters[0]`
+
 #### mballoc 用到的结构体
 
 在 mballoc 在中使用 `ext4_allocation_context` 结构来追踪块分配的情况。
@@ -726,6 +734,125 @@ struct ext4_allocation_request {
 };
 ```
 
+ext4_group_info 结构体用于存储关于每个块组的分配状态和统计信息。它记录了每个块组中的空闲块和空闲块碎片（碎片是指不连续的空闲块区域）。以下是该结构体的详细注释：
+
+```c
+struct ext4_group_info {
+	unsigned long   bb_state;       // 块组的状态标志，例如是否需要检查、是否有空闲块等。
+	struct rb_root  bb_free_root;   // 空闲块的红黑树，用于快速查找和管理空闲块。
+	ext4_grpblk_t	bb_first_free;	/* 第一个空闲块的编号 */
+	ext4_grpblk_t	bb_free;	    /* 该块组中总的空闲块数量 */
+	ext4_grpblk_t	bb_fragments;	/* 空闲块碎片的数量，即非连续空闲块的数量 */
+	struct          list_head bb_prealloc_list;  // 预分配块的链表，用于跟踪预分配的块。
+
+#ifdef DOUBLE_CHECK
+	void            *bb_bitmap;     // 用于双重检查的位图指针，在启用 DOUBLE_CHECK 宏时有效。
+#endif
+
+	struct rw_semaphore alloc_sem;  // 读写信号量，用于控制块分配时的同步。
+
+	/* bb_counters[] 是一个数组，用于存储每个块组中按 2 的幂次方划分的空闲块区域的数量。
+	 * 例如，bb_counters[3] = 5 表示该块组中有 5 个连续的 8 个块的空闲区域。
+	 */
+	ext4_grpblk_t	bb_counters[];	/* 每个区域的空闲块数量，按 2 的幂次方进行划分，
+					 * 数组的索引表示块区域的大小。
+					 * bb_counters[3] = 5 表示有 5 个 8 块大小的空闲区域。*/
+};
+```
+
+除此之外在 `ext4_sb_info` 中也维护了多块分配器相关的信息。在ext4_sb_info中使用ext4_group_info结构体组成的数组成员s_group_info记录每个块组的分配信息。
+
+#### 初始化多块分配器
+
+buddy系统的bitmap是由页缓存来管理的，而这个页缓存必须是整个文件系统范围内的，因此ext4在ext4_sb_info结构里面用一个inode结构体来管理buddy的页缓存，字段名为s_buddy_cache。该结构在函数 `ext4_mb_init_backend` 中被分配。
+
+```c
+ext4_get_sb()->ext4_fill_super()->ext4_mb_init()->ext4_mb_init_backend()
+```
+
+```c
+static int ext4_mb_init_backend(struct super_block *sb)
+{
+	ext4_group_t ngroups = ext4_get_groups_count(sb); // 获取文件系统中的组数量
+	ext4_group_t i;
+	struct ext4_sb_info *sbi = EXT4_SB(sb); // 获取超级块信息
+	struct ext4_super_block *es = sbi->s_es; // 获取扩展4超级块
+	int num_meta_group_infos; // 元组组信息数量
+	int num_meta_group_infos_max; // 最大元组组信息数量
+	int array_size; // 数组大小
+	struct ext4_group_desc *desc; // 组描述符
+
+	/* 计算用于 GDT 的块数量 */
+	num_meta_group_infos = (ngroups + EXT4_DESC_PER_BLOCK(sb) -
+				1) >> EXT4_DESC_PER_BLOCK_BITS(sb);
+
+	/*
+	 * 计算 GDT 使用的总块数，包括 GDT 的保留块数。
+	 * s_group_info 数组根据此值分配，以便在不复杂操作指针的情况下进行干净的在线调整。
+	 * 缺点是在没有调整发生时会浪费内存，但这在页面级别上是非常低的
+	 * （见下面的注释）
+	 * 当允许 META_BG 调整时需要正确处理这个问题。
+	 */
+	num_meta_group_infos_max = num_meta_group_infos +
+				le16_to_cpu(es->s_reserved_gdt_blocks);
+
+	/*
+	 * array_size 是 s_group_info 数组的大小。我们将其向上取整到下一个 2 的幂，
+	 * 因为 kmalloc 内部进行这个近似，因此我们可以在这里多分配一些内存
+	 * （例如，可能用于 META_BG 调整）。
+	 */
+	array_size = 1;
+	while (array_size < sizeof(*sbi->s_group_info) *
+	       num_meta_group_infos_max)
+		array_size = array_size << 1;
+
+	/* 
+	 * 一个 8TB 文件系统需要 4096 字节的 kmalloc 内存，
+	 * 一个 128KB 的分配应足以满足 256TB 文件系统的需求。
+	 * 因此，目前只需使用两级方案。
+	 */
+	sbi->s_group_info = kmalloc(array_size, GFP_KERNEL); // 分配 s_group_info 数组
+	if (sbi->s_group_info == NULL) { // 检查分配是否成功
+		printk(KERN_ERR "EXT4-fs: can't allocate buddy meta group\n");
+		return -ENOMEM; // 分配失败，返回内存不足错误
+	}
+
+	sbi->s_buddy_cache = new_inode(sb); // 创建新的 inode 用于缓存
+	if (sbi->s_buddy_cache == NULL) { // 检查创建是否成功
+		printk(KERN_ERR "EXT4-fs: can't get new inode\n");
+		goto err_freesgi; // 创建失败，释放 s_group_info
+	}
+	EXT4_I(sbi->s_buddy_cache)->i_disksize = 0; // 初始化磁盘大小为 0
+
+	// 遍历所有组，添加组信息
+	for (i = 0; i < ngroups; i++) {
+		desc = ext4_get_group_desc(sb, i, NULL); // 获取组描述符
+		if (desc == NULL) { // 检查获取是否成功
+			printk(KERN_ERR "EXT4-fs: can't read descriptor %u\n", i);
+			goto err_freebuddy; // 读取失败，释放 buddy 缓存
+		}
+		if (ext4_mb_add_groupinfo(sb, i, desc) != 0) // 添加组信息
+			goto err_freebuddy; // 添加失败，释放 buddy 缓存
+	}
+
+	return 0; // 成功初始化
+
+// 错误处理：释放 buddy 缓存
+err_freebuddy:
+	while (i-- > 0)
+		kfree(ext4_get_group_info(sb, i)); // 释放之前添加的组信息
+
+	i = num_meta_group_infos; // 释放 s_group_info 数组
+	while (i-- > 0)
+		kfree(sbi->s_group_info[i]);
+	iput(sbi->s_buddy_cache); // 释放 buddy 缓存 inode
+
+err_freesgi:
+	kfree(sbi->s_group_info); // 释放 s_group_info 数组
+	return -ENOMEM; // 返回内存不足错误
+}
+```
+
 #### 多块分配器的分配流程
 
 多块分配器入口函数为 `ext4_mb_new_blocks`
@@ -746,13 +873,75 @@ ext4_mb_mark_diskspace_used()//标记使用的磁盘空间
 在为文件分配一个新块时，会检查文件所对应的块组有没有被初始化。如果块组没有被初始化，就会ext4调用ext4_mb_init_group()函数对buddy系统进行初始化：
 
 ```c
-ext4_mb_regular_allocator  ext4_mb_load_buddy ext4_mb_init_group
+ext4_mb_regular_allocator() -> ext4_mb_find_by_goal() -> ext4_mb_load_buddy() -> ext4_mb_init_group() -> ext4_mb_init_cache()
 ```
-
 
 在ext4_mb_new_blocks()函数，当采用常规的分配方式分配成功后，如果所分得的长度大于最初要求分配的长度，那么多余出来的这部分空间就可以用来预分配
 
+**在伙伴系统中寻找连续的块**
+
 ```c
+static int mb_find_extent(struct ext4_buddy *e4b, int order, int block,
+				int needed, struct ext4_free_extent *ex)
+{
+	int next = block;    // 当前正在处理的块号
+	int max;             // 当前 buddy 系统中的最大块号
+	int ord;             // 当前块的阶数（表示块的大小，阶数越高，块越大）
+	void *buddy;         // 指向 buddy 位图的指针
+
+	assert_spin_locked(ext4_group_lock_ptr(e4b->bd_sb, e4b->bd_group)); // 确保当前已锁定组的自旋锁
+	BUG_ON(ex == NULL); // 确保传入的结构体指针不为空
+
+	buddy = mb_find_buddy(e4b, order, &max); // 根据阶数找到 buddy 位图和其最大块数
+	BUG_ON(buddy == NULL); // 确保 buddy 不为空
+	BUG_ON(block >= max);  // 确保块号在 buddy 系统的范围内
+	if (mb_test_bit(block, buddy)) { // 检查块是否已经被占用
+		// 如果块已被占用，设置空闲区间长度为 0 并返回
+		ex->fe_len = 0;
+		ex->fe_start = 0;
+		ex->fe_group = 0;
+		return 0;
+	}
+
+	/* FIXME: 是否完全舍弃 order? */
+	if (likely(order == 0)) {
+		/* 如果 order 为 0，则重新查找块对应的实际阶数 */
+		order = mb_find_order_for_block(e4b, block);
+		block = block >> order; // 将块号缩小为相应阶数的大小
+	}
+
+	// 设置初始空闲区间信息
+	ex->fe_len = 1 << order;          // 根据阶数设置区间长度
+	ex->fe_start = block << order;    // 根据阶数设置起始块号
+	ex->fe_group = e4b->bd_group;     // 设置区间所属的块组
+
+	// 计算起始块到给定块之间的差值
+	next = next - ex->fe_start;       // 计算需要跳过的块数
+	ex->fe_len -= next;               // 减去跳过的块
+	ex->fe_start += next;             // 更新区间起始块号
+
+	// 循环查找连续的空闲块，直到满足所需长度或找不到更多空闲块
+	while (needed > ex->fe_len &&
+	       (buddy = mb_find_buddy(e4b, order, &max))) {
+
+		if (block + 1 >= max)  // 如果块号超出范围，结束查找
+			break;
+
+		next = (block + 1) * (1 << order);  // 计算下一个块号
+		if (mb_test_bit(next, EXT4_MB_BITMAP(e4b)))  // 如果下一个块已被占用，结束查找
+			break;
+
+		ord = mb_find_order_for_block(e4b, next); // 查找下一个块的阶数
+
+		order = ord;
+		block = next >> order; // 更新当前块号为下一个块号
+		ex->fe_len += 1 << order; // 增加找到的空闲区间长度
+	}
+
+	// 确保区间的起始和长度在合法范围内
+	BUG_ON(ex->fe_start + ex->fe_len > (1 << (e4b->bd_blkbits + 3)));
+	return ex->fe_len; // 返回找到的空闲区间长度
+}
 
 ```
 
