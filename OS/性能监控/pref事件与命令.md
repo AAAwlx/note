@@ -63,3 +63,10 @@ unsigned long flags:
 
 标志位，用于进一步配置事件的行为。
 常见的标志包括 PERF_FLAG_FD_CLOEXEC（在 execve 后自动关闭文件描述符）等。
+
+在linux上提供perf指令对系统性能进行分析
+
+1. Perf top 实时显示系统/进程的性能统计信息
+2. Perf stat 分析系统/进程的整体性能概况
+3. Perf record 记录一段时间内系统/进程的性能时间
+4. Perf Report 读取perf record生成的数据文件，并显示分析数据
