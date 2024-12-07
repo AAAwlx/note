@@ -17,6 +17,14 @@ int handle_tp(void *ctx)
 }
 ```
 
+如果在编程过程中用到了 vmlinux.h 需要先将 vmlinux.h 拷贝到当前目录下
+
+```shell
+ bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+
+```
+
+
 编译 ebpf 内核程序：
 
 ```sh
