@@ -353,3 +353,8 @@ int main() {
 ```
 
 [protobuf CPP 代码生成规律](https://www.cnblogs.com/lianshuiwuyi/p/12291208.html)
+
+```shell
+ protoc --go_out=. --go-grpc_out=. example.proto 
+ protoc -I=. --grpc_out=. --plugin=protoc-gen-grpc=/usr/local/bin/grpc_cpp_plugin example.proto 
+```
