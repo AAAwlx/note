@@ -804,7 +804,13 @@ int device_create_file(struct device *dev,
 以下为初始化 pci 设备的调用链：
 
 ```c
-pci_bus_add_devices() -> pci_bus_add_device() -> device_add() -> bus_probe_device() -> device_attach() -> __device_attach() ->driver_probe_device() -> really_probe() -> dev->bus->probe(dev) -> pci_device_probe() -> __pci_device_probe() -> pci_call_probe() -> local_pci_probe() -> pci_driver.probe()
+pci_bus_add_devices() -> pci_bus_add_device()
+ -> device_add() -> bus_probe_device() 
+ -> device_attach() -> __device_attach() 
+ ->driver_probe_device() -> really_probe() 
+ -> dev->bus->probe(dev) -> pci_device_probe() 
+ -> __pci_device_probe() -> pci_call_probe() 
+ -> local_pci_probe() -> pci_driver.probe()
 ```
 
 其中 `dev->bus->probe(dev)` 为 `bus_type` 中的成员函数 `probe` 。该函数用作总线设备的探测函数，每个不同的总线设备都有不同的 `probe` 函数。
