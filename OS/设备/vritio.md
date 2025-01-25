@@ -24,7 +24,30 @@
 
 但是在引入了 vritio 之后，前端驱动在虚拟机的内核中实现。这样就能减少一次虚拟机到客户机的切换（中断上下文切换）
 
-在 vritio 前端将数据准备好放入到 vritio_queue 后虚拟机向qemu发送通知表示已将数据准备好。
+在 vritio 前端将数据准备好放入到 vritio_queue 后虚拟机通过kvm向qemu发送通知表示已将数据准备好。
 
 https://blog.csdn.net/qq_41596356/article/details/128248214
 
+Virtio Device、Virtio Driver、Virtqueue和Notification（eventfd/irqfd）是虚拟化环境中Virtio架构的关键组件，它们共同作用以实现高效的I/O虚拟化。以下是对这四个组件的详细解释：
+
+**Virtio Device（虚拟设备）**
+
+- 作用：Virtio Device是虚拟机（Guest OS）中模拟的虚拟设备，如网卡、块设备等。它们通过Virtio接口与宿主机（Host）进行通信，提供虚拟化环境中的I/O功能。
+- 特点：Virtio Device通过半虚拟化技术，允许Guest OS直接与宿主机的设备驱动程序交互，从而提高I/O性能。
+
+**Virtio Driver（虚拟设备驱动）**
+
+- 作用：Virtio Driver是安装在Guest OS内核中的驱动程序，用于管理Virtio Device。它负责处理I/O请求，并与宿主机的Virtio后端驱动程序进行通信。
+- 特点：Virtio Driver通过Virtio接口与宿主机的后端驱动程序进行交互，实现高效的数据传输。它需要Guest OS的支持，并且通常在制作虚拟机镜像时预装。
+
+**Virtqueue（虚拟队列）**
+
+- 作用：Virtqueue是Virtio架构中用于前后端通信的机制，它允许Guest OS和宿主机之间高效地传输数据。每个Virtio Device可以配置一个或多个Virtqueue。
+- 特点：Virtqueue使用环形缓冲区（Ring Buffer）来存储描述符和数据，支持批量处理I/O请求，减少上下文切换和内存拷贝，提高I/O性能。
+
+**Notification（事件通知，如eventfd/irqfd）**
+
+- 作用：Notification机制用于在Virtio Device和Virtio Driver之间传递事件通知，如数据可用或设备状态变化。常见的实现方式包括eventfd和irqfd。
+- 特点：
+  - eventfd：用于进程间或用户态与内核态之间的事件通知，通过文件描述符进行通信。它适用于轻量级的事件通知，但不能传递复杂的数据内容。
+  - irqfd：用于向Guest OS注入中断，实现中断虚拟化。它将eventfd与全局中断号关联，当向eventfd写入数据时，触发对应的中断。
