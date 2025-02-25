@@ -642,6 +642,42 @@ retry: // 重试标签，如果出现错误如 ENOSPC，会跳回此处重试
 
 在 mballoc 多块分配器中采用了伙伴系统的算法，一次可以分配多个连续的块。相比于传统的一次只分配一个块可以使文件在磁盘上的排布尽量连续。
 
+mballoc多块分配器的伙伴系统和内存的伙伴系统思想上大致是相同的，但是在实现上有些许不同。
+
+在文件系统中会引入 buddy bitmap 来记录空闲块的情况，buddy bitmap 会在文件系统被挂载时读取 block map 并统计其中的空闲块信息。
+
+![Alt text](image-2.png)
+
+对于 buddy bitmap 的位置会被记录在 `ext4_group_info` 结构体中。
+
+```c
+struct ext4_group_info {
+	unsigned long   bb_state;
+	struct rb_root  bb_free_root; // 挂ext4_free_data的红黑树
+	ext4_grpblk_t	bb_first_free;	// 第一个是空闲的块
+	ext4_grpblk_t	bb_free;	// 总的空间块个数
+	ext4_grpblk_t	bb_fragments;	// 连续的空闲空间段数目
+	ext4_grpblk_t	bb_largest_free_order; // block group中最大的空闲空间的阶
+	struct          list_head bb_prealloc_list; // 挂ext4_prealloc_space
+#ifdef DOUBLE_CHECK
+	void            *bb_bitmap;
+#endif
+	struct rw_semaphore alloc_sem;
+	ext4_grpblk_t	bb_counters[];	// 用一个数组记录每个阶的空闲空间有多少个
+};
+
+```
+
+假设6-7的block是空闲的，0-5的block是占用的，8-15的block是空闲的，那么它构建出来的buddy bitmap如下：
+
+![Alt text](../image/mballoc示例1.png)
+
+一个块可以被更高一阶的伙伴占用，也可以被分配给一个实际的文件用于存储。
+
+在这里如果一个伙伴块被划分到更高一层级的伙伴块中或者被分配出去都会被置位为1。比如6-7的和8到15的block都是空闲的，八个连在一起，那么就会被视作阶数为3的伙伴。在阶数为 2 和为 1 的 buddy bitmap 就会被置位为 1 表明这个块已经被占用。
+
+同时如果一整个伙伴中有块被分配出去，那么这整个伙伴对应的 buddy bitmap 也会被置位为 1 。比如 0-5 被占用 0-8 三阶的伙伴都被置位为 1 。
+
 入口函数：
 
 ```c
