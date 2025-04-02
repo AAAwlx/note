@@ -367,6 +367,8 @@ kvm_dev_ioctl - kvm_dev_ioctl_create_vm - kvm_create_vm -
 				kvm_arch_dev_ioctl - 
 ```
 
+在 kvm_dev_ioctl_create_vm 函数中会创建 dev/kvm-vm 设备用于操作虚拟机的内存。
+
 ```c
 long kvm_arch_dev_ioctl(struct file *filp,
 			unsigned int ioctl, unsigned long arg)
