@@ -1,6 +1,8 @@
 # cpu调频子系统
 
-核心结构体的关系
+## 核心结构体
+
+核心结构体的关系图：
 
 ```mermaid
 classDiagram
@@ -31,13 +33,103 @@ classDiagram
         +...
     }
 
-    cpufreq_policy "1" *-- "1" cpufreq_governor : 动态绑定
+    cpufreq_policy "1" *-- "1" cpufreq_governor : 依赖per_cpu动态绑定
     cpufreq_policy "1" *-- "1" amd_cpudata : 驱动私有数据
     cpufreq_driver --o cpufreq_policy : 通过API操作
 ```
 
-`cpufreq_policy` 结构体，代表 CPU 频率调节的策略。该结构体一般会在 cpufreq_driver 初始化时作为结构体参数传入，建立cpufreq_driver 与 
-cpufreq_policy 之间的联系
+### cpufreq_driver
+
+cpufreq_driver负责频率的设定工作，用于驱动硬件。
+
+```c
+/**
+ * struct cpufreq_driver - CPU频率调节驱动结构体
+ * 
+ * 该结构体定义了CPU频率调节驱动需要实现的接口和属性
+ */
+struct cpufreq_driver {
+    char name[CPUFREQ_NAME_LEN];  // 驱动名称
+    u16 flags;                    // 驱动标志位
+    void *driver_data;            // 驱动私有数据指针
+
+    /* 所有驱动必须实现的回调函数 */
+    int (*init)(struct cpufreq_policy *policy);  // 初始化函数
+    int (*verify)(struct cpufreq_policy_data *policy);  // 验证频率参数是否有效
+
+    /* 以下两个回调函数只需实现其中一个 */
+    int (*setpolicy)(struct cpufreq_policy *policy);  // 设置频率调节策略
+    int (*target)(struct cpufreq_policy *policy,      // 设置目标频率(已弃用)
+                 unsigned int target_freq,
+                 unsigned int relation);
+    
+    /* 替代target()的现代接口 */
+    int (*target_index)(struct cpufreq_policy *policy,  // 通过性能等级索引设置频率
+                       unsigned int index);
+    unsigned int (*fast_switch)(struct cpufreq_policy *policy,  // 快速频率切换
+                               unsigned int target_freq);
+    
+    /**
+     * ->fast_switch()的替代接口，用于可以传递性能提示的驱动
+     * 只有在设置了->fast_switch时才能设置此回调
+     */
+    void (*adjust_perf)(unsigned int cpu,
+                       unsigned long min_perf,
+                       unsigned long target_perf,
+                       unsigned long capacity);
+
+    /* 
+     * 仅适用于没有设置CPUFREQ_ASYNC_NOTIFICATION且实现了target_index()的驱动
+     * 用于在切换到目标频率前先切换到中间稳定频率
+     */
+    unsigned int (*get_intermediate)(struct cpufreq_policy *policy,
+                                   unsigned int index);
+    int (*target_intermediate)(struct cpufreq_policy *policy,
+                              unsigned int index);
+
+    /* 获取当前CPU频率，出错时返回0 */
+    unsigned int (*get)(unsigned int cpu);
+
+    /* 在收到固件通知时更新策略限制 */
+    void (*update_limits)(unsigned int cpu);
+
+    /* 可选回调函数 */
+    int (*bios_limit)(int cpu, unsigned int *limit);  // 获取BIOS限制的频率
+    int (*online)(struct cpufreq_policy *policy);     // CPU上线时调用
+    int (*offline)(struct cpufreq_policy *policy);    // CPU下线时调用
+    void (*exit)(struct cpufreq_policy *policy);      // 驱动退出时调用
+    int (*suspend)(struct cpufreq_policy *policy);    // 系统挂起时调用
+    int (*resume)(struct cpufreq_policy *policy);     // 系统恢复时调用
+
+    /* 驱动完全初始化后调用 */
+    void (*ready)(struct cpufreq_policy *policy);
+
+    struct freq_attr **attr;  // 频率属性指针数组
+
+    /* 平台特定的boost支持 */
+    bool boost_enabled;       // boost功能是否启用
+    int (*set_boost)(struct cpufreq_policy *policy, int state);  // 设置boost状态
+
+    /* 
+     * 在策略完全初始化后但调速器启动前注册能量模型
+     */
+    void (*register_em)(struct cpufreq_policy *policy);
+};
+```
+
+cpufreq_register_driver函数为cpufreqdriver注册的入口，驱动程序通过调用该函数进行初始化，并传入相关的struct cpufreq_driver，cpufreq_register_driver会调用subsys_interface_register，最终执行回调函数cpufreq_add_dev。
+
+![alt text](image-2.png)
+```mermaid
+flowchart TD
+    A[cpufreq_add_dev] --> B[cpufreq_online] --> C[cpufreq_driver->init]
+```
+
+cpufreq_driver->init最终在这里会调到我们注册的驱动的init函数。
+
+### cpufreq_policy
+
+`cpufreq_policy` 结构体，代表 CPU 频率调节的策略相关的一组限制条件。该结构体一般会在 cpufreq_driver 初始化时作为结构体参数传入，建立cpufreq_driver 与 cpufreq_policy 之间的联系
 ```c
 struct cpufreq_policy {
 	/* CPUs sharing clock, require sw coordination */
@@ -60,7 +152,7 @@ struct cpufreq_policy {
 
 	unsigned int		policy; /* 当前频率调节策略 */
 	unsigned int		last_policy; /* 拔出 CPU 之前的策略 */
-	struct cpufreq_governor	*governor; /* 频率调节器（governor） */
+	struct cpufreq_governor	*governor; /* 频率调节器（governor） 关联具体的dbs_data*/
 	void			*governor_data; /* 存储与 governor 相关的数据 */
 	char			last_governor[CPUFREQ_NAME_LEN]; /* 最后使用的 governor 名称 */
 
@@ -142,22 +234,24 @@ struct cpufreq_policy {
 };
 ```
 
-### 主要结构体字段解释：
-- `cpus`, `related_cpus`, `real_cpus`：定义了与频率策略相关的 CPU 集合，包括在线、离线和实际存在的 CPU。
-- `clk`：指向与 CPU 频率相关的时钟结构。
-- `cpuinfo`：包含 CPU 的频率信息，如支持的频率范围。
-- `min`, `max`, `cur`, `suspend_freq`：CPU 频率的最小、最大、当前和挂起时使用的频率。
-- `governor`：当前频率调节器，用于决定如何调节 CPU 的频率。
-- `rwsem`：用于并发控制的读写信号量，确保对 `cpufreq_policy` 结构的安全访问。
-- `fast_switch_possible`, `fast_switch_enabled`：标记是否支持快速频率切换。
-- `boost_enabled`：启用性能提升的标志。
-- `transition_lock` 和 `transition_wait`：用于同步频率转换过程。
-- `stats`：记录 CPU 频率调节的统计信息。
-- `cdev`：如果该策略涉及热管理，会指向一个冷却设备，用于 thermal mitigation（热缓解）。
+* cpus和related_cpus    这两个都是cpumask_var_t变量，cpus表示的是这一policy控制之下的所有还出于online状态的cpu，而related_cpus则是online和offline两者的合集。主要是用于多个cpu使用同一种policy的情况，实际上，我们平常见到的大多数系统中都是这种情况：所有的cpu同时使用同一种policy。我们需要related_cpus变量指出这个policy所管理的所有cpu编号。
+* cpu和last_cpu    虽然一种policy可以同时用于多个cpu，但是通常一种policy只会由其中的一个cpu进行管理，cpu变量用于记录用于管理该policy的cpu编号，而last_cpu则是上一次管理该policy的cpu编号（因为管理policy的cpu可能会被plug out，这时候就要把管理工作迁移到另一个cpu上）。
+* cpuinfo    保存cpu硬件所能支持的最大和最小的频率以及切换延迟信息。
+* min/max/cur  该policy下的可使用的最小频率，最大频率和当前频率。
+* policy    该变量可以取以下两个值：CPUFREQ_POLICY_POWERSAVE和CPUFREQ_POLICY_PERFORMANCE，该变量只有当调频驱动支持setpolicy回调函数的时候有效，这时候由驱动根据policy变量的值来决定系统的工作频率或状态。如果调频驱动（cpufreq_driver）支持target回调，则频率由相应的governor来决定。
+* governor和governor_data    指向该policy当前使用的cpufreq_governor结构和它的上下文数据。governor是实现该policy的关键所在，调频策略的逻辑由governor实现。
+* update    有时在中断上下文中需要更新policy，需要利用该工作队列把实际的工作移到稍后的进程上下文中执行。
+* user_policy    有时候因为特殊的原因需要修改policy的参数，比如溫度过高时，最大可允许的运行频率可能会被降低，为了在适当的时候恢复原有的运行参数，需要使用user_policy保存原始的参数（min，max，policy，governor）。
+* kobj    该policy在sysfs中对应的kobj的对象。
+
 
 这些字段的组合使得该结构能够处理复杂的 CPU 频率调节策略，并提供相关的同步、统计和性能提升功能。
 
+cpufreq_set_policy cpufreq_init_governor policy->governor->init 
 
+### cpufreq_governor
+
+governor负责检测cpu的使用状况，从而在可用的范围中选择一个合适的频率，代码中它用cpufreq_governor结构来表示：
 
 ```c
 struct cpufreq_governor {
@@ -202,6 +296,11 @@ struct cpufreq_governor {
 
 ```
 
+* name    该governor的名字。
+* initialized    初始化标志。
+* governor    指向一个回调函数，CPUFreq Core会在不同的阶段调用该回调函数，用于该governor的启动、停止、初始化、退出动作。
+* list_head    所有注册的governor都会利用该字段链接在一个全局链表中，以供系统查询和使用。
+
 ### cpufreq_driver 与 cpufreq_policy 之间关系的建立
 
 cpufreq_policy 和 cpufreq_driver 是两个重要的结构，它们之间的关系是 CPU 频率管理的核心部分。cpufreq_policy 代表着一个或多个 CPU 的频率调节策略，而 cpufreq_driver 则是具体的硬件频率驱动，它提供了对 CPU 频率的控制接口。
@@ -228,12 +327,6 @@ sequenceDiagram
     Note over Policy: 3. 运行时调频
     Policy->>Driver: policy->driver->target()
     Driver-->>Policy: 执行硬件调频
-```
-
-注册一个 cpufreq 驱动函数：
-
-```c
-cpufreq_register_driver(current_pstate_driver)
 ```
 
 ### cpufreq_governor 与 cpufreq_policy 之间关系的建立
@@ -335,4 +428,60 @@ static int cpufreq_init_governor(struct cpufreq_policy *policy)
 
 ```
 
+## 向外部暴露接口
+
+cpu调频子系统通过sysfs向外部暴露接口
+
+cpu频率调节接口的注册
+
+```c
+#define cpufreq_freq_attr_ro(_name)		\
+static struct freq_attr _name =			\
+__ATTR(_name, 0444, show_##_name, NULL)
+
+#define cpufreq_freq_attr_ro_perm(_name, _perm)	\
+static struct freq_attr _name =			\
+__ATTR(_name, _perm, show_##_name, NULL)
+
+#define cpufreq_freq_attr_rw(_name)		\
+static struct freq_attr _name =			\
+__ATTR(_name, 0644, show_##_name, store_##_name)
+
+#define cpufreq_freq_attr_wo(_name)		\
+static struct freq_attr _name =			\
+__ATTR(_name, 0200, NULL, store_##_name)
+
+#define define_one_global_ro(_name)		\
+static struct kobj_attribute _name =		\
+__ATTR(_name, 0444, show_##_name, NULL)
+
+#define define_one_global_rw(_name)		\
+static struct kobj_attribute _name =		\
+__ATTR(_name, 0644, show_##_name, store_##_name)
+```
+__ATTR宏：
+```c
+/**
+ * __ATTR - 定义一个设备属性（struct attribute）
+ * @_name:  属性名称（字符串，如 "value"、"status"）
+ * @_mode:  文件权限（八进制，如 0644）
+ * @_show:  读取属性时调用的函数（show callback）
+ * @_store: 写入属性时调用的函数（store callback）
+ *
+ * 该宏用于初始化一个 struct attribute 结构体，通常用于 sysfs 文件系统。
+ * 示例见 include/linux/device.h。
+ */
+#define __ATTR(_name, _mode, _show, _store) {               \
+    .attr = {                                               \
+        .name = __stringify(_name),  /* 将属性名转为字符串 */ \
+        .mode = VERIFY_OCTAL_PERMISSIONS(_mode), /* 校验权限 */ \
+    },                                                      \
+    .show   = _show,   /* 读取属性时调用的函数指针 */         \
+    .store  = _store,  /* 写入属性时调用的函数指针 */         \
+}
+```
+
+​​0444​​（只读）：用户可 cat 查看，但不能修改（如 scaling_cur_freq）。
+​​0644​​（读写）：用户可 cat 和 echo（如 scaling_max_freq）。
+​​0200​​（只写）：用户只能 echo（如触发频率切换的命令）。
 
