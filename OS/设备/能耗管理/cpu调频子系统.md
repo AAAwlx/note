@@ -119,8 +119,6 @@ struct cpufreq_driver {
 
 cpufreq_register_driver函数为cpufreqdriver注册的入口，驱动程序通过调用该函数进行初始化，并传入相关的struct cpufreq_driver，cpufreq_register_driver会调用subsys_interface_register，最终执行回调函数cpufreq_add_dev。
 
-
-
 ```mermaid
 flowchart TD
     A[cpufreq_add_dev] --> B[cpufreq_online] --> C[cpufreq_driver->init]
@@ -130,7 +128,7 @@ cpufreq_driver->init最终在这里会调到我们注册的驱动的init函数�
 
 ### cpufreq_policy
 
-`cpufreq_policy` 结构体，代表 CPU 频率调节的策略相关的一组限制条件。该结构体一般会在 cpufreq_driver 初始化时作为结构体参数传入，建立cpufreq_driver 与 cpufreq_policy 之间的联系
+`cpufreq_policy` 结构体，代表 CPU 频率调节的策略相关的一组限制条件。该结构体一般会保存在cpu的专属信息中，在 cpufreq_driver 初始化时通过percpu来获取并作为参数传入，建立cpufreq_driver 与 cpufreq_policy 之间的联系。
 ```c
 struct cpufreq_policy {
 	/* CPUs sharing clock, require sw coordination */
@@ -302,6 +300,8 @@ struct cpufreq_governor {
 * governor    指向一个回调函数，CPUFreq Core会在不同的阶段调用该回调函数，用于该governor的启动、停止、初始化、退出动作。
 * list_head    所有注册的governor都会利用该字段链接在一个全局链表中，以供系统查询和使用。
 
+该结构在最3.x等较低的版本中只有 governor 一个回调函数，在该函数中处理init exit start 等等事件，后面在高版本的内核中 4.x+ 之后将 governor 拆开成为上述结构体中的多种结构。
+
 ### cpufreq_driver 与 cpufreq_policy 之间关系的建立
 
 cpufreq_policy 和 cpufreq_driver 是两个重要的结构，它们之间的关系是 CPU 频率管理的核心部分。cpufreq_policy 代表着一个或多个 CPU 的频率调节策略，而 cpufreq_driver 则是具体的硬件频率驱动，它提供了对 CPU 频率的控制接口。
@@ -429,9 +429,140 @@ static int cpufreq_init_governor(struct cpufreq_policy *policy)
 
 ```
 
+## 调频过程
+
+触发调频策略：
+
+```mermaid
+graph LR
+    A[cpufreq_add_policy_cpu] -->| 添加新的cpu核心 | B(__cpufreq_governor)
+	 c[__cpufreq_remove_dev_prepare]-->| 移除cpu核心 | B(__cpufreq_governor)
+	 d[__cpufreq_remove_dev_finish]-->| 清理策略 | B(__cpufreq_governor)
+	 e[cpufreq_suspend]-->| 暂停 CPUFreq 调速器 | B(__cpufreq_governor)
+	 f[cpufreq_resume]-->| 恢复 CPUFreq 调速器 | B(__cpufreq_governor)
+	  g[cpufreq_set_policy]-->| 更新或切换 CPU 频率策略 | B(__cpufreq_governor)
+    B --> H[od_cpufreq_governor_dbs]
+```
+### 启动一个 Governor 
+
+在启动一个Governor会遍历使用该policy的所有的处于online状态的cpu，针对每一个cpu，做以下动作：
+
+- 取出该cpu相关联的cpu_dbs_common_info结构指针，之前已经讨论过，governor定义了一个per_cpu变量来定义各个cpu所对应的cpu_dbs_common_info结构，通过common_dbs_data结构的回调函数可以获取该结构的指针。
+- 初始化cpu_dbs_common_info结构的cpu，cur_policy，prev_cpu_idle，prev_cpu_wall，prev_cpu_nice字段，其中，prev_cpu_idle，prev_cpu_wall这两个字段会被以后的负载计算所使用。
+- 为每个cpu初始化一个工作队列，工作队列的执行函数是common_dbs_data结构中的gov_dbs_timer字段所指向的回调函数，对于ondemand来说，该函数是：od_dbs_timer。这个工作队列会被按照设定好的采样率定期地被唤醒，进行cpu负载的统计工作。
+
+```mermaid
+%% 时序图：CPUFREQ_GOV_START 事件流程
+sequenceDiagram
+    participant UserSpace as 用户空间
+    participant Core as cpufreq-core
+    participant Governor as cpufreq-gov
+    participant Driver as gov-xxxx
+
+    Note over Core,Driver: CPUFREQ_GOV_START 事件流程
+    UserSpace ->> Core: 触发频率策略变更 (sd CPUFREQ_GOV_START)
+    Core ->> Core: __cpufreq_set_policy()
+    Core ->> Governor: policy->governor->governor(CPUFREQ_GOV_START)
+    
+    Governor ->> Governor: cpufreq_governor_dbs()
+    Governor ->> Governor: for_each_cpu()<br>初始化每个CPU策略
+    Governor ->> Governor: get_cpu_idle_time()
+    Governor ->> Governor: INIT_DELAYED_WORK(cdbs->work)
+     Governor ->> Governor: gov_queue_work
+    Governor ->> Driver: 调用驱动特定逻辑<br>(如硬件频率设置)
+    Driver -->> Governor: 返回状态
+    Governor -->> Core: 返回策略执行结果
+    Core -->> UserSpace: 返回操作状态
+```
+
+## 初始化
+
+cpufreq 子系统属于 platform 总线下的一种设备。Platform 的 概念如下：
+
+Platform 总线是 Linux 内核中用于管理 ​​非枚举型设备​​（即不能通过标准总线（如 PCI、USB）自动发现的设备）的一种虚拟总线机制。它主要用于嵌入式系统，特别是基于 ​​设备树（Device Tree, DT）​​ 的 ARM 架构设备。
+
+​​1. Platform 总线的作用​​
+Platform 总线主要用于管理两类设备：
+
+​​SoC 集成外设​​（如 UART、I2C、GPIO、时钟控制器等）
+这些设备通常直接集成在芯片内部，无法通过标准总线枚举。
+​​设备树描述的硬件​​
+在 ARM 嵌入式系统中，设备树（.dts）会描述硬件信息，内核通过 Platform 总线匹配驱动和设备。
+
+在操作系统初始化的过程中会对 platform 总线进行初始化并在此过程中探测属于该总线下的设备并调用他们的 probe 接口进行初始化
+
+```c
+static struct platform_driver dt_cpufreq_platdrv = {
+	.driver = {
+		.name	= "cpufreq-dt",
+	},
+	.probe		= dt_cpufreq_probe,
+	.remove		= dt_cpufreq_remove,
+};
+```
+
+cpufreq 子系统的起点就是 dt_cpufreq_probe 函数。
+
+![alt text](../../image/cpu调频子系统初始化.png)
+
 ## 向外部暴露接口
 
 cpu调频子系统通过sysfs向外部暴露接口
+
+### DEVICE_ATTR_RW
+
+在这里我们一般使用 DEVICE_ATTR_RW 来注册用于操作 cpufreq_driver 的接口，该宏主要是面向硬件驱动的一种实现。
+
+```c
+static DEVICE_ATTR_RW(xxx);
+static DEVICE_ATTR_RO(xxx);
+static DEVICE_ATTR_WO(xxx);
+ 
+//如drm_sysfs.c (msm-5.4/drivers/gpu/drm)
+static DEVICE_ATTR_RW(status);
+static DEVICE_ATTR_RO(enabled);
+static DEVICE_ATTR_RO(dpms);
+static DEVICE_ATTR_RO(modes);
+ 
+static struct attribute *connector_dev_attrs[] = {
+    &dev_attr_status.attr,
+    &dev_attr_enabled.attr,
+    &dev_attr_dpms.attr,
+    &dev_attr_modes.attr,
+    NULL
+};
+ 
+2. 宏展开
+#define DEVICE_ATTR_RW(_name) \
+    struct device_attribute dev_attr_##_name = __ATTR_RW(_name)
+#define DEVICE_ATTR_RO(_name) \
+    struct device_attribute dev_attr_##_name = __ATTR_RO(_name)
+#define DEVICE_ATTR_WO(_name) \
+    struct device_attribute dev_attr_##_name = __ATTR_WO(_name)
+ //sysfs.h (msm-5.4\include\linux)
+ #define __ATTR_RO(_name) {                     \
+    .attr   = { .name = __stringify(_name), .mode = 0444 },     \
+    .show   = _name##_show,                     \
+}
+#define __ATTR_RW(_name) __ATTR(_name, 0644, _name##_show, _name##_store)
+#define __ATTR(_name, _mode, _show, _store) {               \
+    .attr = {.name = __stringify(_name),                \
+         .mode = VERIFY_OCTAL_PERMISSIONS(_mode) },     \
+    .show   = _show,                        \
+    .store  = _store,                       \
+}
+ 
+static device_attribute dev_attr_status = {
+    .attr   = {
+        .name = "status",
+        .mode = 0644
+        },
+    .show   = status_show,
+    .store  = status_store,
+}
+```
+
+在创建好该接口后需要使用 sysfs_create_file（单个）/sysfs_create_group（多个）来创建这一组定义的接口
 
 cpu频率调节接口的注册
 
@@ -485,4 +616,6 @@ __ATTR宏：
 ​​0444​​（只读）：用户可 cat 查看，但不能修改（如 scaling_cur_freq）。
 ​​0644​​（读写）：用户可 cat 和 echo（如 scaling_max_freq）。
 ​​0200​​（只写）：用户只能 echo（如触发频率切换的命令）。
+
+
 
