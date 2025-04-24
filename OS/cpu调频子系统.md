@@ -119,7 +119,8 @@ struct cpufreq_driver {
 
 cpufreq_register_driver函数为cpufreqdriver注册的入口，驱动程序通过调用该函数进行初始化，并传入相关的struct cpufreq_driver，cpufreq_register_driver会调用subsys_interface_register，最终执行回调函数cpufreq_add_dev。
 
-![alt text](image-2.png)
+
+
 ```mermaid
 flowchart TD
     A[cpufreq_add_dev] --> B[cpufreq_online] --> C[cpufreq_driver->init]
