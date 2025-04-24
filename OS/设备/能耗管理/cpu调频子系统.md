@@ -475,6 +475,27 @@ sequenceDiagram
     Core -->> UserSpace: 返回操作状态
 ```
 
+系统负载的检测与调频
+
+在 Governor 启动后，每个工作队列都会运行注册在 common_dbs_data 中的 timer 函数。在 timer 函数中会对cpu的负载进行检测与计算最终决定要不要调整频率。
+
+```mermaid
+%% 时序图：CPUFREQ_GOV_START 事件流程
+sequenceDiagram
+    participant workqueue as workqueue
+    participant Governor as cpufreq-gov
+    participant Ondemand as gov-ondemand
+
+    workqueue ->> Ondemand: od_dbs_timer() ondemand的定时器回调函数
+    Ondemand  ->>  Governor: od_dbs_check_cpu() 检查CPU负载并决定是否需要调频
+    Governor  ->>  Governor: cpu_load_get_by_cstate0() 计算load（负载）
+    Ondemand ->> Governor: od_check_cpu() 检查CPU负载并决定频率调整策略
+    Governor ->> Governor: dbs_freq_increase()或者__cpufreq_driver_target()<br>直接升到最大频率或根据计算得到的结果设置目标频率
+
+```
+
+在 __cpufreq_driver_target 会调用前面注册的 driver 中的函数控制硬件进行频率调整。
+
 ## 初始化
 
 cpufreq 子系统属于 platform 总线下的一种设备。Platform 的 概念如下：
