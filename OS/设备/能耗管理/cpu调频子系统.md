@@ -21,7 +21,7 @@ classDiagram
         +...
     }
 
-    class amd_cpudata {
+    class cpudata {
         +u64 epp_cached
         +u32 min_freq
         +...
@@ -34,7 +34,7 @@ classDiagram
     }
 
     cpufreq_policy "1" *-- "1" cpufreq_governor : 依赖per_cpu动态绑定
-    cpufreq_policy "1" *-- "1" amd_cpudata : 驱动私有数据
+    cpufreq_policy "1" *-- "1" cpudata : 驱动私有数据
     cpufreq_driver --o cpufreq_policy : 通过API操作
 ```
 
@@ -246,7 +246,7 @@ struct cpufreq_policy {
 
 这些字段的组合使得该结构能够处理复杂的 CPU 频率调节策略，并提供相关的同步、统计和性能提升功能。
 
-cpufreq_set_policy cpufreq_init_governor policy->governor->init 
+cpufreq_add_dev -> __cpufreq_add_dev -> cpufreq_init_policy cpufreq_set_policy -> cpufreq_init_governor -> policy->governor->init 
 
 ### cpufreq_governor
 
@@ -429,6 +429,37 @@ static int cpufreq_init_governor(struct cpufreq_policy *policy)
 
 ```
 
+## 初始化
+
+cpufreq 子系统属于 platform 总线下的一种设备。Platform 的 概念如下：
+
+Platform 总线是 Linux 内核中用于管理 ​​非枚举型设备​​（即不能通过标准总线（如 PCI、USB）自动发现的设备）的一种虚拟总线机制。它主要用于嵌入式系统，特别是基于 ​​设备树（Device Tree, DT）​​ 的 ARM 架构设备。
+
+​​1. Platform 总线的作用​​
+Platform 总线主要用于管理两类设备：
+
+​​SoC 集成外设​​（如 UART、I2C、GPIO、时钟控制器等）
+这些设备通常直接集成在芯片内部，无法通过标准总线枚举。
+​​设备树描述的硬件​​
+在 ARM 嵌入式系统中，设备树（.dts）会描述硬件信息，内核通过 Platform 总线匹配驱动和设备。
+
+在操作系统初始化的过程中会对 platform 总线进行初始化并在此过程中探测属于该总线下的设备并调用他们的 probe 接口进行初始化
+
+```c
+static struct platform_driver dt_cpufreq_platdrv = {
+	.driver = {
+		.name	= "cpufreq-dt",
+	},
+	.probe		= dt_cpufreq_probe,
+	.remove		= dt_cpufreq_remove,
+};
+```
+
+cpufreq 子系统的起点就是 dt_cpufreq_probe 函数。
+
+![alt text](../../image/cpu调频子系统初始化.png)
+
+
 ## 调频过程
 
 触发调频策略：
@@ -441,8 +472,108 @@ graph LR
 	 e[cpufreq_suspend]-->| 暂停 CPUFreq 调速器 | B(__cpufreq_governor)
 	 f[cpufreq_resume]-->| 恢复 CPUFreq 调速器 | B(__cpufreq_governor)
 	  g[cpufreq_set_policy]-->| 更新或切换 CPU 频率策略 | B(__cpufreq_governor)
-    B --> H[od_cpufreq_governor_dbs]
+    B --> H[cpufreq_governor.governor]
 ```
+
+不同的 Governor 会有自己不同的频率调整策略，这里以 ondemand 为例：
+
+```c
+struct cpufreq_governor cpufreq_gov_ondemand = {
+	.name			= "ondemand",
+	.governor		= od_cpufreq_governor_dbs,
+	.max_transition_latency	= TRANSITION_LATENCY_LIMIT,
+	.owner			= THIS_MODULE,
+};
+```
+
+### 策略层结构体间的关系
+
+顶层的 dbs_data 通过 cpufreq_policy 的 governor_data 成员与一个 cpufreq_policy_data 关联。成员与一个 cpufreq_policy 关联。（这里在高版本的内核中发生了一些变动）
+
+```mermaid
+classDiagram
+    class od_cpu_load_info {
+        <<Data>>
+        #ifndef CONFIG_AMD_PSTATE
+        uint32_t avg_load_total
+        uint32_t rate_mult_count
+        uint32_t avg_real_count
+        uint32_t load_avg_curr
+        uint32_t avg_count
+        #endif
+        uint64_t prev_mperf
+        uint64_t prev_tsc
+        unsigned int apic_timer_irqs
+        unsigned int irq_resched_count
+        unsigned int irq_call_count
+    }
+
+    class cpu_dbs_common_info {
+        <<Per-CPU Data>>
+        int cpu
+        cpufreq_policy *cur_policy
+        delayed_work delay_work
+        delayed_work defer_work
+        mutex timer_mutex
+    }
+
+    class od_cpu_dbs_info_s {
+        <<Governor-Specific Data>>
+        cpu_dbs_common_info cdbs
+        unsigned int rate_mult
+    }
+
+    class od_dbs_tuners {
+        <<Tunable Parameters>>
+        unsigned int sampling_rate
+        unsigned int sampling_down_factor
+        unsigned int up_threshold
+        unsigned int interrupts_limit
+        #ifndef CONFIG_AMD_PSTATE
+        unsigned int load_ratio
+        unsigned int avg_threshold
+        unsigned int dynamic_rate_set
+        unsigned int rate_mult_per_count
+        #endif
+    }
+
+    class common_dbs_data {
+        <<Governor Framework>>
+        attribute_group *attr_group_gov_sys
+        attribute_group *attr_group_gov_pol
+        dbs_data *gdbs_data
+        get_cpu_cdbs()
+        get_cpu_dbs_info_s()
+        gov_dbs_timer()
+        gov_check_cpu()
+        init()
+        exit()
+        void *gov_ops
+    }
+
+    class dbs_data {
+        <<Per-Policy Instance>>
+        common_dbs_data *cdata
+        unsigned int min_sampling_rate
+        int usage_count
+        void *tuners
+        mutex mutex
+    }
+
+    od_cpu_dbs_info_s --* cpu_dbs_common_info : 包含
+    dbs_data --* common_dbs_data : 引用公共配置
+    dbs_data --* od_dbs_tuners : 存储可调参数
+    common_dbs_data --> od_cpu_dbs_info_s : 通过get_cpu_dbs_info_s()获取
+    common_dbs_data --> cpu_dbs_common_info : 通过get_cpu_cdbs()获取
+    cpu_dbs_common_info --> od_cpu_load_info : 关联性能计数数据
+```
+1. struct od_cpu_load_info ：存储 单个 CPU 核心的实时负载数据，用于动态调速器（如 ondemand）计算当前负载率。
+2. struct cpu_dbs_common_info：管理 所有调速器共享的 CPU 基础信息，确保多核间的协调。
+3. struct od_cpu_dbs_info_s：扩展公共数据，实现 ondemand 调速器的核心逻辑。继承自cpu_dbs_common_info。
+4. struct od_dbs_tuners存储：用户空间可调节的参数（通过 sysfs 暴露）。
+5. common_dbs_data：定义 调速器的通用操作接口，支持不同调速器（ondemand/conservative）的插件化实现。
+6. dbs_data：管理每个策略（policy）的调速器实例数据。
+
 ### 启动一个 Governor 
 
 在启动一个Governor会遍历使用该policy的所有的处于online状态的cpu，针对每一个cpu，做以下动作：
@@ -475,7 +606,7 @@ sequenceDiagram
     Core -->> UserSpace: 返回操作状态
 ```
 
-系统负载的检测与调频
+### 系统负载的检测与调频
 
 在 Governor 启动后，每个工作队列都会运行注册在 common_dbs_data 中的 timer 函数。在 timer 函数中会对cpu的负载进行检测与计算最终决定要不要调整频率。
 
@@ -496,41 +627,46 @@ sequenceDiagram
 
 在 __cpufreq_driver_target 会调用前面注册的 driver 中的函数控制硬件进行频率调整。
 
-## 初始化
-
-cpufreq 子系统属于 platform 总线下的一种设备。Platform 的 概念如下：
-
-Platform 总线是 Linux 内核中用于管理 ​​非枚举型设备​​（即不能通过标准总线（如 PCI、USB）自动发现的设备）的一种虚拟总线机制。它主要用于嵌入式系统，特别是基于 ​​设备树（Device Tree, DT）​​ 的 ARM 架构设备。
-
-​​1. Platform 总线的作用​​
-Platform 总线主要用于管理两类设备：
-
-​​SoC 集成外设​​（如 UART、I2C、GPIO、时钟控制器等）
-这些设备通常直接集成在芯片内部，无法通过标准总线枚举。
-​​设备树描述的硬件​​
-在 ARM 嵌入式系统中，设备树（.dts）会描述硬件信息，内核通过 Platform 总线匹配驱动和设备。
-
-在操作系统初始化的过程中会对 platform 总线进行初始化并在此过程中探测属于该总线下的设备并调用他们的 probe 接口进行初始化
-
-```c
-static struct platform_driver dt_cpufreq_platdrv = {
-	.driver = {
-		.name	= "cpufreq-dt",
-	},
-	.probe		= dt_cpufreq_probe,
-	.remove		= dt_cpufreq_remove,
-};
+```mermaid
+graph TD
+    A[开始] --> B[获取CPU调频参数]
+    B --> C{当前负载 > 上调阈值?}
+    
+    %% 升频分支
+    C -->|是| D{当前频率 < 最大频率?}
+    D -->|是| E[设置rate_mult=采样下降因子]
+    D -->|否| F[保持rate_mult不变]
+    E & F --> G[升频至最大频率]
+    
+    %% 降频分支
+    C -->|否| H[计算目标频率]
+    H --> I[重置rate_mult=1]
+    I --> J{是否启用省电偏置?}
+    J -->|否| K[直接设置目标频率]
+    J -->|是| L[应用省电偏置调整]
+    L --> M[设置调整后频率]
 ```
 
-cpufreq 子系统的起点就是 dt_cpufreq_probe 函数。
+## 硬件驱动实现调频
 
-![alt text](../../image/cpu调频子系统初始化.png)
+对于硬件驱动的调频这里有两种实现。
+
+1. cpufreq policy中会指定频率范围policy->{min, max}，之后通过setpolicy接口，使其生效。在这里并不会考虑软件层面的 governor 策略。
+2. cpufreq policy在指定频率范围的同时，会指明使用的governor。governor在启动后，会动态的（例如启动一个timer，监测系统运行情况，并根据负荷调整频率），或者静态的（直接设置为某一个合适的频率值），设定cpu运行频率。
+
+```mermaid
+graph LR
+    A[用户/系统设置] --> B{驱动模式}
+    B -->|策略模式| C[setpolicy设置范围]
+    B -->|频率模式| D[governor计算target_freq]
+    D --> E[target选择最近频率]
+```
 
 ## 向外部暴露接口
 
-cpu调频子系统通过sysfs向外部暴露接口
+cpu调频子系统通过sysfs向外部暴露接口。这这里主要分为面向 cpufreq_driver 硬件调控侧的接口 和 cpufreq_governor 
 
-### DEVICE_ATTR_RW
+### DEVICE_ATTR_RW 注册 driver
 
 在这里我们一般使用 DEVICE_ATTR_RW 来注册用于操作 cpufreq_driver 的接口，该宏主要是面向硬件驱动的一种实现。
 
@@ -585,7 +721,7 @@ static device_attribute dev_attr_status = {
 
 在创建好该接口后需要使用 sysfs_create_file（单个）/sysfs_create_group（多个）来创建这一组定义的接口
 
-cpu频率调节接口的注册
+#### cpufreq_freq_attr_ 注册 策略接口
 
 ```c
 #define cpufreq_freq_attr_ro(_name)		\
@@ -612,31 +748,7 @@ __ATTR(_name, 0444, show_##_name, NULL)
 static struct kobj_attribute _name =		\
 __ATTR(_name, 0644, show_##_name, store_##_name)
 ```
-__ATTR宏：
-```c
-/**
- * __ATTR - 定义一个设备属性（struct attribute）
- * @_name:  属性名称（字符串，如 "value"、"status"）
- * @_mode:  文件权限（八进制，如 0644）
- * @_show:  读取属性时调用的函数（show callback）
- * @_store: 写入属性时调用的函数（store callback）
- *
- * 该宏用于初始化一个 struct attribute 结构体，通常用于 sysfs 文件系统。
- * 示例见 include/linux/device.h。
- */
-#define __ATTR(_name, _mode, _show, _store) {               \
-    .attr = {                                               \
-        .name = __stringify(_name),  /* 将属性名转为字符串 */ \
-        .mode = VERIFY_OCTAL_PERMISSIONS(_mode), /* 校验权限 */ \
-    },                                                      \
-    .show   = _show,   /* 读取属性时调用的函数指针 */         \
-    .store  = _store,  /* 写入属性时调用的函数指针 */         \
-}
-```
 
 ​​0444​​（只读）：用户可 cat 查看，但不能修改（如 scaling_cur_freq）。
 ​​0644​​（读写）：用户可 cat 和 echo（如 scaling_max_freq）。
 ​​0200​​（只写）：用户只能 echo（如触发频率切换的命令）。
-
-
-
