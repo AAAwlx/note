@@ -662,6 +662,15 @@ graph LR
     D --> E[target选择最近频率]
 ```
 
+硬件自主调频的本质​​：
+当驱动注册 .setpolicy 接口时：
+
+​​硬件层（CPU 自主决策）​​
+​​调节主体​​：CPU 内部的时钟控制器（如 AMD 的 SMU 或 CCLK DPM）
+​​输入参数​​：
+软件设定的 policy->min/max 频率范围（通过 MSR_AMD_CPPC_REQ 寄存器）
+EPP 值（通过 MSR_AMD_EPP 寄存器）
+
 ## 向外部暴露接口
 
 cpu调频子系统通过sysfs向外部暴露接口。这这里主要分为面向 cpufreq_driver 硬件调控侧的接口 和 cpufreq_governor 
