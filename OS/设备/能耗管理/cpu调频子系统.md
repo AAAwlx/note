@@ -732,6 +732,8 @@ static device_attribute dev_attr_status = {
 
 #### cpufreq_freq_attr_ 注册 策略接口
 
+在cpu调频子系统中，涉及到策略层面会有很多参数，如果我们需要对参数进行调整，我们可以通过sysfs来暴露一个接口供用户对这些参数进行调整。
+
 ```c
 #define cpufreq_freq_attr_ro(_name)		\
 static struct freq_attr _name =			\
@@ -761,3 +763,7 @@ __ATTR(_name, 0644, show_##_name, store_##_name)
 ​​0444​​（只读）：用户可 cat 查看，但不能修改（如 scaling_cur_freq）。
 ​​0644​​（读写）：用户可 cat 和 echo（如 scaling_max_freq）。
 ​​0200​​（只写）：用户只能 echo（如触发频率切换的命令）。
+
+在这里我们在模块中实现
+
+show_##_name 和 store_##_name 这两个函数接口即可。
