@@ -490,83 +490,8 @@ struct cpufreq_governor cpufreq_gov_ondemand = {
 
 顶层的 dbs_data 通过 cpufreq_policy 的 governor_data 成员与一个 cpufreq_policy_data 关联。成员与一个 cpufreq_policy 关联。（这里在高版本的内核中发生了一些变动）
 
-```mermaid
-classDiagram
-    class od_cpu_load_info {
-        <<Data>>
-        #ifndef CONFIG_AMD_PSTATE
-        uint32_t avg_load_total
-        uint32_t rate_mult_count
-        uint32_t avg_real_count
-        uint32_t load_avg_curr
-        uint32_t avg_count
-        #endif
-        uint64_t prev_mperf
-        uint64_t prev_tsc
-        unsigned int apic_timer_irqs
-        unsigned int irq_resched_count
-        unsigned int irq_call_count
-    }
+![alt text](image.png)
 
-    class cpu_dbs_common_info {
-        <<Per-CPU Data>>
-        int cpu
-        cpufreq_policy *cur_policy
-        delayed_work delay_work
-        delayed_work defer_work
-        mutex timer_mutex
-    }
-
-    class od_cpu_dbs_info_s {
-        <<Governor-Specific Data>>
-        cpu_dbs_common_info cdbs
-        unsigned int rate_mult
-    }
-
-    class od_dbs_tuners {
-        <<Tunable Parameters>>
-        unsigned int sampling_rate
-        unsigned int sampling_down_factor
-        unsigned int up_threshold
-        unsigned int interrupts_limit
-        #ifndef CONFIG_AMD_PSTATE
-        unsigned int load_ratio
-        unsigned int avg_threshold
-        unsigned int dynamic_rate_set
-        unsigned int rate_mult_per_count
-        #endif
-    }
-
-    class common_dbs_data {
-        <<Governor Framework>>
-        attribute_group *attr_group_gov_sys
-        attribute_group *attr_group_gov_pol
-        dbs_data *gdbs_data
-        get_cpu_cdbs()
-        get_cpu_dbs_info_s()
-        gov_dbs_timer()
-        gov_check_cpu()
-        init()
-        exit()
-        void *gov_ops
-    }
-
-    class dbs_data {
-        <<Per-Policy Instance>>
-        common_dbs_data *cdata
-        unsigned int min_sampling_rate
-        int usage_count
-        void *tuners
-        mutex mutex
-    }
-
-    od_cpu_dbs_info_s --* cpu_dbs_common_info : 包含
-    dbs_data --* common_dbs_data : 引用公共配置
-    dbs_data --* od_dbs_tuners : 存储可调参数
-    common_dbs_data --> od_cpu_dbs_info_s : 通过get_cpu_dbs_info_s()获取
-    common_dbs_data --> cpu_dbs_common_info : 通过get_cpu_cdbs()获取
-    cpu_dbs_common_info --> od_cpu_load_info : 关联性能计数数据
-```
 1. struct od_cpu_load_info ：存储 单个 CPU 核心的实时负载数据，用于动态调速器（如 ondemand）计算当前负载率。
 2. struct cpu_dbs_common_info：管理 所有调速器共享的 CPU 基础信息，确保多核间的协调。
 3. struct od_cpu_dbs_info_s：扩展公共数据，实现 ondemand 调速器的核心逻辑。继承自cpu_dbs_common_info。
