@@ -490,7 +490,7 @@ struct cpufreq_governor cpufreq_gov_ondemand = {
 
 顶层的 dbs_data 通过 cpufreq_policy 的 governor_data 成员与一个 cpufreq_policy_data 关联。成员与一个 cpufreq_policy 关联。（这里在高版本的内核中发生了一些变动）
 
-![alt text](image.png)
+![Alt text](../../image/cpu调频.png)
 
 1. struct od_cpu_load_info ：存储 单个 CPU 核心的实时负载数据，用于动态调速器（如 ondemand）计算当前负载率。
 2. struct cpu_dbs_common_info：管理 所有调速器共享的 CPU 基础信息，确保多核间的协调。
