@@ -499,6 +499,125 @@ struct cpufreq_governor cpufreq_gov_ondemand = {
 5. common_dbs_data：定义 调速器的通用操作接口，支持不同调速器（ondemand/conservative）的插件化实现。
 6. dbs_data：管理每个策略（policy）的调速器实例数据。
 
+#### od_dbs_tuners 
+
+```c
+struct od_dbs_tuners {
+    /* 负载计算参数 */
+    unsigned int load_ratio;          // 实际负载与最大负载的比率阈值（百分比）
+                                      // 用于判断是否触发升频操作
+    /* 频率调整阈值 */
+    unsigned int up_threshold;        // CPU负载触发升频的阈值（百分比）
+                                      // 当负载超过此值时，调度器会提高频率
+    /* 采样控制参数 */
+    unsigned int sampling_rate;       // 采样间隔时间（微秒us）
+                                      // 决定多久检测一次CPU负载
+    unsigned int sampling_down_factor; // 降频时的采样率放大因子
+                                      // 例如设为3时，降频决策的采样间隔是升频时的3倍
+                                      // 用于避免频率抖动
+};
+```
+
+**`load_ratio` 的作用与意义**
+
+`load_ratio` 是 Linux CPU 频率调控（CPUFreq）中 `ondemand` 调速器 的一个关键参数，用于 控制滑动平均负载（`load_avg_curr`）的计算方式，直接影响 CPU 调频的敏感度和响应速度。
+
+---
+
+**1. `load_ratio` 的定义**
+• 类型：`unsigned int`（通常取值范围 `0~100`，表示百分比）  
+
+• 作用：  
+
+  • 在计算滑动平均负载时，决定 新采样负载 和 历史平均负载 的混合比例。  
+
+  • 公式：  
+
+    \[
+    \text{load\_avg\_curr} = \frac{(100 - \text{load\_ratio}) \times \text{当前负载} + \text{load\_ratio} \times \text{历史平均}}{100}
+    \]
+  • 值越大：历史负载的权重越高，调频响应越平滑（适合稳定负载）。  
+
+  • 值越小：当前负载的权重越高，调频响应越灵敏（适合突发负载）。
+
+
+---
+
+**2. `load_ratio` 在代码中的使用**
+在 `set_avg_load()` 函数中，`load_ratio` 用于计算 指数加权移动平均（EWMA）：
+```c
+dbs_cpu_info->load_avg_curr = 
+    ((ONE_HUNDRED_PERCENT - load_ratio) * 当前负载 + 
+     load_ratio * 历史平均负载) / ONE_HUNDRED_PERCENT;
+```
+• `ONE_HUNDRED_PERCENT` 通常是 `100`，表示百分比基准。  
+
+• `load_ratio` 的典型默认值：  
+
+  • Intel 平台：可能较高（如 `80`），强调平滑性。  
+
+  • AMD 平台：可能较低（如 `50`），强调响应速度。
+
+
+---
+
+**3. `load_ratio` 的影响**
+| `load_ratio` 值 | 调频行为 | 适用场景 |
+|---------------------|-------------|-------------|
+| 高（如 80） | 历史负载影响大，调频保守，避免频繁升降频 | 服务器、稳定负载场景 |
+| 中（如 50） | 平衡新旧负载，适中响应 | 通用计算（桌面、虚拟机） |
+| 低（如 20） | 当前负载影响大，调频敏感，快速响应突发任务 | 实时性要求高的场景（游戏、低延迟应用） |
+
+---
+
+**4. `load_ratio` 与 `sampling_down_factor` 的关系**
+• `load_ratio`：控制 负载计算的平滑性（数学层面）。  
+
+• `sampling_down_factor`：控制 降频的延迟（策略层面）。  
+
+• 两者配合：  
+
+  • 高 `load_ratio` + 高 `sampling_down_factor` → 极保守调频（适合服务器）。  
+
+  • 低 `load_ratio` + 低 `sampling_down_factor` → 极灵敏调频（适合实时任务）。
+
+
+---
+
+**5. 如何调整 `load_ratio`？**
+**(1) 查看当前值**
+```bash
+cat /sys/devices/system/cpu/cpufreq/ondemand/load_ratio
+```
+（注：部分内核版本可能不直接暴露此参数，需通过内核代码或模块参数调整。）
+
+**(2) 修改默认值（需重新编译内核或模块）**
+在 `ondemand` 调速器代码中，通常定义在：
+```c
+struct od_dbs_tuners {
+    unsigned int load_ratio;  // 默认值可能为 50 或 80
+    // ...
+};
+```
+可通过内核启动参数或模块参数覆盖：
+```bash
+modprobe cpufreq_ondemand load_ratio=30
+```
+
+---
+
+**6. 总结**
+• `load_ratio` 是 `ondemand` 调速器用于 平滑 CPU 负载计算 的关键参数。  
+
+• 值越大 → 调频越保守（适合稳定负载）。  
+
+• 值越小 → 调频越灵敏（适合突发任务）。  
+
+• 通常与 `sampling_down_factor` 配合使用，优化不同场景的 CPU 调频策略。  
+
+
+如果你是 内核开发者 或 性能调优工程师，可以通过调整 `load_ratio` 优化 CPU 频率响应策略！
+
 ### 启动一个 Governor 
 
 在启动一个Governor会遍历使用该policy的所有的处于online状态的cpu，针对每一个cpu，做以下动作：
