@@ -618,6 +618,32 @@ modprobe cpufreq_ondemand load_ratio=30
 
 如果你是 内核开发者 或 性能调优工程师，可以通过调整 `load_ratio` 优化 CPU 频率响应策略！
 
+#### struct od_cpu_load_info
+
+```c
+struct od_cpu_load_info {
+    /* 负载统计相关 */
+    uint32_t avg_load_total;      // 累计负载总和（用于计算滑动平均）
+    uint32_t load_avg_curr;       // 当前滑动平均负载（百分比）
+
+    /* 采样计数相关 */
+    uint32_t avg_real_count;      // 实际采样次数（考虑动态调整系数后的加权计数）
+    uint32_t avg_count;           // 原始采样次数（每次调频检查+1）
+
+    /* 硬件性能计数器 */
+    uint64_t prev_mperf;          // 上一次记录的MPERF值（测量实际运行周期）
+    uint64_t prev_tsc;            // 上一次记录的TSC值（时间戳计数器）
+
+    /* 调频动态调整相关（非AMD平台专用） */
+#ifndef CONFIG_AMD_PSTATE
+    uint32_t rate_mult_count;     // 动态调频系数累计值（用于Intel平台敏感度调节）
+#endif
+
+    /* 状态标志 */
+    bool timer_running;           // 标记当前CPU的调频定时器是否正在运行
+};
+```
+
 ### 启动一个 Governor 
 
 在启动一个Governor会遍历使用该policy的所有的处于online状态的cpu，针对每一个cpu，做以下动作：
