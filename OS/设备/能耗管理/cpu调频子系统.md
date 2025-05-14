@@ -518,105 +518,11 @@ struct od_dbs_tuners {
 };
 ```
 
-**`load_ratio` 的作用与意义**
+* `load_ratio`：是 Linux CPU 频率调控（CPUFreq）中 `ondemand` 调速器 的一个关键参数，用于 控制滑动平均负载（`load_avg_curr`）的计算方式
+  ![alt text](image.png)
+  * 值越大：历史负载的权重越高，调频响应越平滑（适合稳定负载）。  
 
-`load_ratio` 是 Linux CPU 频率调控（CPUFreq）中 `ondemand` 调速器 的一个关键参数，用于 控制滑动平均负载（`load_avg_curr`）的计算方式，直接影响 CPU 调频的敏感度和响应速度。
-
----
-
-**1. `load_ratio` 的定义**
-• 类型：`unsigned int`（通常取值范围 `0~100`，表示百分比）  
-
-• 作用：  
-
-  • 在计算滑动平均负载时，决定 新采样负载 和 历史平均负载 的混合比例。  
-
-  • 公式：  
-
-    \[
-    \text{load\_avg\_curr} = \frac{(100 - \text{load\_ratio}) \times \text{当前负载} + \text{load\_ratio} \times \text{历史平均}}{100}
-    \]
-  • 值越大：历史负载的权重越高，调频响应越平滑（适合稳定负载）。  
-
-  • 值越小：当前负载的权重越高，调频响应越灵敏（适合突发负载）。
-
-
----
-
-**2. `load_ratio` 在代码中的使用**
-在 `set_avg_load()` 函数中，`load_ratio` 用于计算 指数加权移动平均（EWMA）：
-```c
-dbs_cpu_info->load_avg_curr = 
-    ((ONE_HUNDRED_PERCENT - load_ratio) * 当前负载 + 
-     load_ratio * 历史平均负载) / ONE_HUNDRED_PERCENT;
-```
-• `ONE_HUNDRED_PERCENT` 通常是 `100`，表示百分比基准。  
-
-• `load_ratio` 的典型默认值：  
-
-  • Intel 平台：可能较高（如 `80`），强调平滑性。  
-
-  • AMD 平台：可能较低（如 `50`），强调响应速度。
-
-
----
-
-**3. `load_ratio` 的影响**
-| `load_ratio` 值 | 调频行为 | 适用场景 |
-|---------------------|-------------|-------------|
-| 高（如 80） | 历史负载影响大，调频保守，避免频繁升降频 | 服务器、稳定负载场景 |
-| 中（如 50） | 平衡新旧负载，适中响应 | 通用计算（桌面、虚拟机） |
-| 低（如 20） | 当前负载影响大，调频敏感，快速响应突发任务 | 实时性要求高的场景（游戏、低延迟应用） |
-
----
-
-**4. `load_ratio` 与 `sampling_down_factor` 的关系**
-• `load_ratio`：控制 负载计算的平滑性（数学层面）。  
-
-• `sampling_down_factor`：控制 降频的延迟（策略层面）。  
-
-• 两者配合：  
-
-  • 高 `load_ratio` + 高 `sampling_down_factor` → 极保守调频（适合服务器）。  
-
-  • 低 `load_ratio` + 低 `sampling_down_factor` → 极灵敏调频（适合实时任务）。
-
-
----
-
-**5. 如何调整 `load_ratio`？**
-**(1) 查看当前值**
-```bash
-cat /sys/devices/system/cpu/cpufreq/ondemand/load_ratio
-```
-（注：部分内核版本可能不直接暴露此参数，需通过内核代码或模块参数调整。）
-
-**(2) 修改默认值（需重新编译内核或模块）**
-在 `ondemand` 调速器代码中，通常定义在：
-```c
-struct od_dbs_tuners {
-    unsigned int load_ratio;  // 默认值可能为 50 或 80
-    // ...
-};
-```
-可通过内核启动参数或模块参数覆盖：
-```bash
-modprobe cpufreq_ondemand load_ratio=30
-```
-
----
-
-**6. 总结**
-• `load_ratio` 是 `ondemand` 调速器用于 平滑 CPU 负载计算 的关键参数。  
-
-• 值越大 → 调频越保守（适合稳定负载）。  
-
-• 值越小 → 调频越灵敏（适合突发任务）。  
-
-• 通常与 `sampling_down_factor` 配合使用，优化不同场景的 CPU 调频策略。  
-
-
-如果你是 内核开发者 或 性能调优工程师，可以通过调整 `load_ratio` 优化 CPU 频率响应策略！
+  * 值越小：当前负载的权重越高，调频响应越灵敏（适合突发负载）。
 
 #### struct od_cpu_load_info
 
@@ -636,7 +542,7 @@ struct od_cpu_load_info {
 
     /* 调频动态调整相关（非AMD平台专用） */
 #ifndef CONFIG_AMD_PSTATE
-    uint32_t rate_mult_count;     // 动态调频系数累计值（用于Intel平台敏感度调节）
+    uint32_t rate_mult_count;     // 动态调频系数累计值（用于amd台敏感度调节）
 #endif
 
     /* 状态标志 */
@@ -716,6 +622,165 @@ graph TD
     J -->|是| L[应用省电偏置调整]
     L --> M[设置调整后频率]
 ```
+
+## gov 策略
+
+在 Linux CPU 频率调节系统中，`governor`（调节策略）决定了 CPU 频率如何根据系统负载动态调整。以下是常见的 governor 策略及其特点：
+
+---
+
+**1. `performance`（性能模式）**
+• 行为：始终将 CPU 频率锁定在最大支持频率
+
+• 适用场景：
+
+  • 需要最高性能的场景（如高性能计算、实时任务）
+
+  • 对延迟敏感的应用（如高频交易）
+
+• 缺点：功耗最高，无法节能
+
+• 示例命令：
+
+  ```bash
+  cpupower frequency-set -g performance
+  ```
+
+---
+
+**2. `powersave`（节能模式）**
+• 行为：始终将 CPU 频率锁定在最低支持频率
+
+• 适用场景：
+
+  • 对性能要求低的轻负载环境
+
+  • 需要最大限度节能的场景（如待机状态）
+
+• 缺点：性能受限，可能造成响应延迟
+
+• 示例命令：
+
+  ```bash
+  cpupower frequency-set -g powersave
+  ```
+
+---
+
+**3. `ondemand`（按需调节）**
+• 行为：
+
+  • 负载超过阈值（默认 80%）时立即升到最高频率
+
+  • 负载降低时逐步降频
+
+• 适用场景：
+
+  • 通用服务器环境
+
+  • 需要平衡性能与功耗的场景
+
+• 特点：
+
+  • 响应速度快，但可能有频率震荡
+
+  • 内核默认策略（部分发行版）
+
+• 调优参数：
+
+  ```bash
+  echo 60 > /sys/devices/system/cpu/cpufreq/ondemand/up_threshold  # 调低升频阈值
+  ```
+
+---
+
+**4. `conservative`（保守模式）**
+• 行为：类似 `ondemand`，但升降频更渐进
+
+• 适用场景：
+
+  • 对频率变化敏感的环境
+
+  • 需要平滑频率过渡的场景
+
+• 特点：
+
+  • 比 `ondemand` 更省电，但性能响应稍慢
+
+• 示例调优：
+
+  ```bash
+  echo 20 > /sys/devices/system/cpu/cpufreq/conservative/down_threshold
+  ```
+
+---
+
+**5. `userspace`（用户空间控制）**
+• 行为：允许用户态程序直接设置频率
+
+• 适用场景：
+
+  • 需要精确控制频率的特殊应用
+
+  • 自定义功耗管理策略开发
+
+• 示例用法：
+
+  ```bash
+  cpupower frequency-set -f 2.4GHz  # 手动设置固定频率
+  ```
+
+---
+
+**6. `schedutil`（调度器驱动）**
+• 行为：基于 Linux 调度器的实际负载数据调节频率
+
+• 适用场景：
+
+  • 新版本内核（≥ 4.7）的默认推荐策略
+
+  • 需要与 CFS 调度器深度集成的环境
+
+• 特点：
+
+  • 比 `ondemand` 更精准的负载预测
+
+  • 更低的延迟和更好的能效比
+
+• 调优参数：
+
+  ```bash
+  echo 1000 > /sys/devices/system/cpu/cpufreq/schedutil/rate_limit_us  # 调节采样间隔
+  ```
+
+---
+
+**7. 特殊策略**
+**(1) `interactive`（交互模式）**
+• 专为移动设备优化，快速响应触摸操作
+
+• 现已基本被 `schedutil` 取代
+
+
+**(2) `intel_pstate`**
+• Intel 专用驱动提供的策略：
+
+  • `active`：类似 `ondemand` 的增强版
+
+  • `passive`：兼容传统 governor 接口
+
+
+---
+
+**策略选择建议**
+| 场景               | 推荐策略       | 备注                     |
+|------------------------|------------------|-----------------------------|
+| 高性能服务器           | `performance`    | 不计功耗追求最大性能          |
+| 通用云服务器           | `schedutil`      | 现代内核的最佳平衡            |
+| 边缘设备（低功耗）     | `powersave`      | 牺牲性能换续航                |
+| 开发测试环境           | `ondemand`       | 传统兼容方案                  |
+| 实时关键任务           | `performance`    | 避免频率波动影响延迟            |
+---
 
 ## 硬件驱动实现调频
 
