@@ -457,7 +457,7 @@ static struct platform_driver dt_cpufreq_platdrv = {
 
 cpufreq 子系统的起点就是 dt_cpufreq_probe 函数。
 
-![alt text](../../image/cpu调频子系统初始化.png)
+![alt text](../image/cpu调频子系统初始化.png)
 
 
 ## 调频过程
@@ -486,11 +486,11 @@ struct cpufreq_governor cpufreq_gov_ondemand = {
 };
 ```
 
-### 策略层结构体间的关系
+### 调频子系统中结构体间的关系
 
-顶层的 dbs_data 通过 cpufreq_policy 的 governor_data 成员与一个 cpufreq_policy_data 关联。成员与一个 cpufreq_policy 关联。（这里在高版本的内核中发生了一些变动）
+（这里在高版本的内核中发生了一些变动）。这里的 driver 与 gov 并不是直接绑定，因为不同的硬件有自己不同的驱动方式，同时用户也有选择不同调频策略的自由。
 
-![Alt text](../../image/cpu调频.png)
+![Alt text](../image/cpu调频.png)
 
 1. struct od_cpu_load_info ：存储 单个 CPU 核心的实时负载数据，用于动态调速器（如 ondemand）计算当前负载率。
 2. struct cpu_dbs_common_info：管理 所有调速器共享的 CPU 基础信息，确保多核间的协调。
