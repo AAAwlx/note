@@ -7,7 +7,16 @@ amd-pstate 是 AMD CPU 性能扩展驱动程序，它在现代 AMD APU 和 Linux
 * auto_sel_en：是否允许硬件自主决定epp值（1允许，0禁止）
 * max/min_perf： CPU 允许的最低性能级别
 * des_perf：目标性能级别，设置后 cpu 会尽力将频率设置到接近目标频率
-* epp：能耗性能偏好设置。调节 CPU 响应 DES_PERF 的激进程度
+* epp：能耗性能偏好设置。调节 CPU 响应 DES_PERF 的激进程度，当偏向性能时，会保证不低于 des_perf 指定的值，如果是偏向能效时则会优先满足 epp 的设置，cpu 频率可能低于 des_perf 指定的值。
+
+des_perf 与 epp 的优先级：
+
+| ​​场景​​	 | 优先级 | 行为 |
+| ------ | ------ | ------ |
+| ​​des_perf > 标称频率​​（超频）	 | ​​des_perf 绝对优先​​	 | 强制尝试达到 des_perf 的目标频率，EPP 仅影响电压（可能因电压不足导致超频失败）。|
+| ​​des_perf < 标称频率​​（超频）	 | ​​EPP 主导执行​​	 | 在满足 des_perf 的​​性能下限​​前提下，根据 EPP 调整实际频率（可能略低于 des_perf）。|
+| ​​硬件限制（温度/TDP）​​	 | ​​硬件保护优先​​	 | 无视 des_perf 和 EPP，降频至安全范围。
+ |
 
 ## 三种模式
 
