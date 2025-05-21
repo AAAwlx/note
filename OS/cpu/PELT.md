@@ -39,13 +39,114 @@ $$MaxCPUcapacity\times\big(\cfrac{runingtime}{1024}\big)$$
 
 $$MaxCPUcapacity\times\big(\cfrac{runnabletime}{1024}\big)$$
 
-任务的瞬时负载和瞬时利用率都是一个快速变化的计算量，但是它们并不适合直接调整调度算法，对于调度器来说需要一个保持平滑的变化。例如，在迁移算法中，在上一个1024us窗口中，是满窗运行，瞬时利用率是1024，立刻将任务迁移到大核，下一个窗口，任务有3/4时间在阻塞状态，利用率急速下降，调度器会将其迁移到小核上执行。这样频繁核间调度也容易引起缓存失效等问题。这并不是我们所期望的。因此这里又引入公式：
+任务的瞬时负载和瞬时利用率都是一个快速变化的计算量，但是它们并不适合直接调整调度算法，对于调度器来说需要一个保持平滑的变化。例如，在迁移算法中，在上一个1024us窗口中，是满窗运行，瞬时利用率是1024，立刻将任务迁移到大核，下一个窗口，任务有3/4时间在阻塞状态，利用率急速下降，调度器会将其迁移到小核上执行。这样频繁核间调度也容易引起缓存失效等问题。这并不是我们所期望的。
+
+因此这里又引入了求平均值的公式，提供平滑的历史趋势：
+
+load_avg = Σ (Li * y^i)   // 加权负载的衰减和
+util_avg = Σ (Ui * y^i)   // 利用率的衰减和
+runnable_avg = Σ (RLi * y^i) // 可运行时间的衰减和
+
+在 Linux 调度器中，`load_avg`、`util_avg` 和 `runnable_avg` 这三个 PELT 指标分别用于不同层级的调度决策。
+
+---
+
+**1. `load_avg`（加权负载平均值）**
+**作用**
+• 表示调度实体（任务或运行队列）的长期加权负载，考虑了任务优先级（`nice` 值）和 CPU 占用时间。  
+
+• 公式：  
+
+  ```
+  load_avg = (weight * runnable_time) / time_decay
+  ```
+  • `weight`：任务优先级权重（如 `nice` 值影响）。  
+
+  • `time_decay`：几何衰减因子（`y^32=0.5`，32ms 前负载贡献减半）。
 
 
+**触发的调度行为**
+1. CFS 负载均衡（CPU 核间任务迁移）  
+   • 当不同 CPU 的 `load_avg` 差异超过阈值时，触发负载均衡（`load_balance()`），将任务从高负载 CPU 迁移到低负载 CPU。  
+
+   • 示例：  
+
+     ◦ CPU0 的 `load_avg = 2000`，CPU1 的 `load_avg = 500` → 迁移部分任务到 CPU1。  
+
+
+2. 任务放置（新任务唤醒时）  
+   • 在 `try_to_wake_up()` 中，选择 `load_avg` 最低的 CPU 放置新唤醒的任务（如 `find_idlest_cpu()`）。  
+
+
+3. 优先级调整（CFS 公平性）  
+   • 高 `load_avg` 的任务可能被降低调度优先级（避免独占 CPU）。
+
+
+---
+
+**2. `util_avg`（CPU 利用率平均值）**
+**作用**
+• 表示 CPU 的实际使用率（0~1024，或按 CPU 算力缩放），直接反映 CPU 的繁忙程度。  
+
+• 公式：  
+
+  ```
+  util_avg = (running_time) / time_decay
+  ```
+  • 仅统计任务 实际运行时间（不包括就绪未运行的时间）。
+
+
+**触发的调度行为**
+1. CPU 频率调整（DVFS，如 `schedutil` 调速器）  
+   • `schedutil` 根据 `util_avg` 动态调整 CPU 频率：  
+
+     ```
+     target_freq = (util_avg / max_capacity) * max_freq
+     ```
+   • 示例：  
+
+     ◦ `util_avg = 800`（`max_capacity=1024`）→ CPU 频率提升至 ~80% 最大频率。  
+
+
+2. 能效调度（EAS，Energy Aware Scheduling）  
+   • 在异构 CPU（如 Arm big.LITTLE）中，选择 `util_avg` 最低的小核运行任务以省电。  
+
+
+3. 实时任务抢占决策  
+   • 高 `util_avg` 的 CPU 可能更快触发实时任务（RT/DL）的抢占。
+
+
+---
+
+**3. `runnable_avg`（可运行状态平均值）**
+**作用**
+• 表示调度实体的可运行压力（无论是否实际运行），反映 CPU 就绪队列的竞争强度。  
+
+• 公式：  
+
+  ```
+  runnable_avg = (runnable_time) / time_decay
+  ```
+  • 统计任务在 就绪队列中的时间（包括等待运行的时间）。
+
+
+**触发的调度行为**
+1. CPU 过载检测（Throttling）  
+   • 如果 `runnable_avg` 持续高于阈值，可能触发调度限流（如 CFS Bandwidth Control）。  
+
+
+2. 负载均衡辅助指标  
+   • 结合 `load_avg` 判断是否需要迁移任务（高 `runnable_avg` 表示 CPU 竞争激烈）。  
+
+
+3. 容器/虚拟机资源分配  
+   • 在 cgroup 或 K8s 中，`runnable_avg` 用于判断是否需扩容 CPU 配额。
 
 ## 常用的结构体
 
 ![alt text](image-3.png)
+
+![alt text](image-2.png)
 
 ### 计算负载sched_avg
 
@@ -70,10 +171,6 @@ struct sched_avg {
 * last_update_time​​：记录最后一次更新时间，用于计算时间差（delta = now - last_update_time），结合 PELT 公式更新负载。
 * ​load_sum / runnable_sum / util_sum​​：这些是 ​​加权累计值​​，用于计算 load_avg、runnable_avg 和 util_avg。PELT 采用 ​​指数衰减加权​​，使得近期负载比历史负载影响更大。
 * ​period_contrib​​:处理跨周期的时间计算，确保 PELT 的衰减计算正确（避免时间片跨越多个周期导致误差）。
-* load_avg：平均负载。load_avg = runnable% * scale_load_down(load)
-* runnable_avg：平均可运行时间。runnable_avg = runnable% * SCHED_CAPACITY_SCALE
-* util_avg​​: ​最重要的字段之一​​，表示任务的 CPU 利用率（范围 0~1024）。例如 util_avg = 512 表示任务平均占用 ​​50% 的单个 CPU​​。
-  util_avg = running% * SCHED_CAPACITY_SCALE
 * util_est​​:用于快速估算利用率（如唤醒任务时），避免实时计算带来的延迟。
 
 ### task_group
@@ -198,15 +295,15 @@ struct sched_entity {
 
 ### struct cfs_rq
 
-用于记录多个层级间
+用于cfs记录调度器多个层级间
 
 ![alt text](image-1.png)
 
-### rq
+### struct rq
 
 ```c
 struct rq {
-	......
+	// ......
 	/* 调度相关 */
 	struct cfs_rq		cfs; // 完全公平调度类
 	struct rt_rq		rt; // 实时调度类
@@ -214,12 +311,68 @@ struct rq {
 #ifdef CONFIG_SCHED_CLASS_EXT
 	struct scx_rq		scx; // 扩展调度类
 #endif
+	// ......
+	unsigned int		clock_update_flags; // 时钟更新标志
+	u64			clock; // 当前时钟
+	/* 确保所有时钟在同一缓存行中 */
+	u64			clock_task ____cacheline_aligned; // 任务时钟
+	u64			clock_pelt; // PELT 时钟
+	unsigned long		lost_idle_time; // 丢失的空闲时间
+	u64			clock_pelt_idle; // PELT 空闲时钟
+	u64			clock_idle; // 空闲时钟
+#ifndef CONFIG_64BIT
+	u64			clock_pelt_idle_copy; // PELT 空闲时钟副本
+	u64			clock_idle_copy; // 空闲时钟副本
+#endif
 }
 ```
 
 一个 cpu 对应一个 rq ，在一个 rq 结构体中又记录了不同调度类的根调度层级
 
-![alt text](image-2.png)
+## 计算权重
+
+### nice 值
+
+​​nice 值​​ 用于调整进程的优先级，影响其在 CPU 时间分配中的权重。以下是关于 nice 值的详细解析，包括其作用、计算方式、与 shares 的关系，以及实际应用示例。
+
+nice 值的作用​​：nice 值是一个 ​​-20 到 19​​ 的整数（默认 0），数值越小，优先级越高（占用更多 CPU 时间）。
+
+​​nice = -20​​：最高优先级（抢占更多 CPU）。
+
+​​nice = 19​​：最低优先级（让出 CPU 时间）。
+
+Linux 内核使用 ​​静态映射表​​（sched_prio_to_weight）将 nice 值转换为权重：
+
+```c
+/*
+ * nice 值是乘法关系，每改变一个 nice 等级，CPU 时间分配会有一个温和的 10% 变化。
+ * 例如，当一个 CPU 密集型任务从 nice 0 变为 nice 1 时，它将比另一个保持在 nice 0 的
+ * CPU 密集型任务少获得约 10% 的 CPU 时间。
+ *
+ * 这种“10% 效应”是相对且累积的：从任意 nice 等级开始，如果上升 1 个等级，
+ * CPU 使用率减少约 10%；如果下降 1 个等级，CPU 使用率增加约 10%。
+ * （为了实现这一点，我们使用了 1.25 的乘数。如果一个任务增加约 10%，
+ * 而另一个任务减少约 10%，那么它们之间的相对差距约为 25%。）
+ */
+const int sched_prio_to_weight[40] = {
+ /* -20 */     88761,     71755,     56483,     46273,     36291,
+ /* -15 */     29154,     23254,     18705,     14949,     11916,
+ /* -10 */      9548,      7620,      6100,      4904,      3906,
+ /*  -5 */      3121,      2501,      1991,      1586,      1277,
+ /*   0 */      1024,       820,       655,       526,       423,
+ /*   5 */       335,       272,       215,       172,       137,
+ /*  10 */       110,        87,        70,        56,        45,
+ /*  15 */        36,        29,        23,        18,        15,
+};
+```
+
+### 计算 Task se 权重
+
+对于task se而言，load weight是明确的，该值是和se的nice value有对应关系。通过下面的公式获得：schd_prio_to_weight[nice]
+
+### 计算 Task group se 权重
+
+
 
 设置权重：
 
