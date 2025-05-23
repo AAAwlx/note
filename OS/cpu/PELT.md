@@ -144,10 +144,6 @@ runnable_avg = Σ (RLi * y^i) // 可运行时间的衰减和
 
 ## 常用的结构体
 
-![alt text](image-3.png)
-
-![alt text](image-2.png)
-
 ### 计算负载sched_avg
 
 ![Alt text](../image/PELT用到的结构体.png)
@@ -237,11 +233,13 @@ struct task_group {
 };
 ```
 
-task_group 中依赖 se 成员来联系到一个调度实体，又通过 se 来连接到 cfs_rq 与 rq。
+task_group 中依赖 se 成员来联系到一个调度实体。一个 task_group 在每一个 cpu 都对应一个 sched_entity 结构并被挂在 cfs_rq 中的红黑树节点上。同时一个 task_group 在每一个 cpu 上都有对应的 cfs_rq 结构体，在该结构体中记录了该调度组内进程的优先级。
 
 ### struct sched_entity
 
-sched_entity 用来描述一个调度实例:
+sched_entity 用来描述一个调度实例，该结构作为一个节点被挂在 cfs_rq 中的红黑树上。一个调度实例既可以对应一个进程，也可以对应一个进程组。
+
+![alt text](image-2.png)
 
 ```c
 struct sched_entity {
@@ -295,11 +293,13 @@ struct sched_entity {
 
 ### struct cfs_rq
 
-用于cfs记录调度器多个层级间
+cfs_rq 记录了这个调度组内的调度实例的优先级。在调度时会选取 cfs_rq 中最左边的节点上 cpu。
 
 ![alt text](image-1.png)
 
 ### struct rq
+
+一个 cpu 对应一个 rq ，在一个 rq 结构体中又记录了不同调度类的根调度层级。
 
 ```c
 struct rq {
@@ -327,7 +327,15 @@ struct rq {
 }
 ```
 
-一个 cpu 对应一个 rq ，在一个 rq 结构体中又记录了不同调度类的根调度层级
+### 结构体之间的关系
+
+在该 cfs 调度中有多个结构体，其中 task_group 用来记录调度组。在进程管理初始化时会初始化 root_task_group 在该结构中记录了所有的进程和进程组。而 rq 则是与 cpu 核一一对应，在 rq 中会记录处在顶层的 cfs_rq 。通过 task_group 和 cfs_rq 来记录调度层级。
+
+![alt text](image-3.png)
+
+多层级的调度：
+
+![alt text](image-4.png)
 
 ## 计算权重
 
@@ -370,10 +378,6 @@ const int sched_prio_to_weight[40] = {
 
 对于task se而言，load weight是明确的，该值是和se的nice value有对应关系。通过下面的公式获得：schd_prio_to_weight[nice]
 
-### 计算 Task group se 权重
-
-
-
 设置权重：
 
 ```
@@ -410,3 +414,85 @@ void set_load_weight(struct task_struct *p, bool update_load)
 		p->se.load = lw;
 }
 ```
+
+### 计算 Task group se 权重
+
+
+**负载权重计算公式演进**
+
+**1. 理想情况下的精确公式**
+```math
+ge\text{->load.weight} = \frac{tg\text{->weight} \times grq\text{->load.weight}}{\sum grq\text{->load.weight}} \quad \text{(1)}
+```
+• 问题：计算总和（Σ）开销过大。
+
+
+---
+
+**2. 近似替代方案**
+用慢速变化的平均值（`grq->avg.load_avg`）替代实时权重：
+```math
+grq\text{->load.weight} \rightarrow grq\text{->avg.load\_avg} \quad \text{(2)}
+```
+得到近似公式：
+```math
+ge\text{->load.weight} = \frac{tg\text{->weight} \times grq\text{->avg.load\_avg}}{tg\text{->load\_avg}} \quad \text{(3)}
+```
+其中：  
+`tg->load_avg ≈ Σ grq->avg.load_avg`（即 `shares_avg`）。
+
+• 优点：计算更高效稳定。  
+
+• 缺点：平均值响应慢，导致边界条件（如空闲组启动任务时）出现瞬态延迟。
+
+
+---
+
+**3. 特殊情况（UP 场景）**
+当其他 CPU 均空闲时，总和坍缩为当前 CPU 的权重：
+```math
+ge\text{->load.weight} = \frac{tg\text{->weight} \times grq\text{->load.weight}}{grq\text{->load.weight}} = tg\text{->weight} \quad \text{(4)}
+```
+
+---
+
+**4. 改进的混合公式**
+结合 (3) 和 (4)，在接近 UP 场景时动态调整：
+```math
+ge\text{->load.weight} = \frac{tg\text{->weight} \times grq\text{->load.weight}}{tg\text{->load\_avg} - grq\text{->avg.load\_avg} + grq\text{->load.weight}} \quad \text{(5)}
+```
+
+• 问题：`grq->load.weight` 可能为 0 导致除零错误。
+
+
+---
+
+**5. 最终修正公式**
+使用 `grq->avg.load_avg` 作为下限：
+```math
+ge\text{->load.weight} = \frac{tg\text{->weight} \times grq\text{->load.weight}}{tg\text{->load\_avg'}} \quad \text{(6)}
+```
+其中：  
+`tg->load_avg' = max(tg->load_avg - grq->avg.load_avg, grq->avg.load_avg) + grq->load.weight`
+
+---
+
+**关键设计思想**
+1. 性能与精度平衡  
+   用平均值（`load_avg`）替代实时值（`load.weight`）降低计算开销。
+2. 边界条件处理  
+   在 UP 场景下回归精确计算，避免瞬态延迟。
+3. 数值安全  
+   通过下限保护防止除零错误。
+
+---
+
+**应用场景**
+
+* CPU 负载均衡：在 CFS 调度器中动态分配任务权重。  
+* 低延迟优化：快速响应新任务启动（如从空闲状态唤醒）。
+
+初始化过程：
+
+![alt text](image-5.png)
+
