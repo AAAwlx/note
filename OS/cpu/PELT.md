@@ -496,3 +496,5 @@ ge\text{->load.weight} = \frac{tg\text{->weight} \times grq\text{->load.weight}}
 
 ![alt text](image-5.png)
 
+## 计算负载
+
