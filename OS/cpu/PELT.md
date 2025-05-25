@@ -60,12 +60,13 @@ runnable_avg = Σ (RLi * y^i) // 可运行时间的衰减和
   ```
   load_avg = (weight * runnable_time) / time_decay
   ```
+
   • `weight`：任务优先级权重（如 `nice` 值影响）。  
 
   • `time_decay`：几何衰减因子（`y^32=0.5`，32ms 前负载贡献减半）。
 
-
 **触发的调度行为**
+
 1. CFS 负载均衡（CPU 核间任务迁移）  
    • 当不同 CPU 的 `load_avg` 差异超过阈值时，触发负载均衡（`load_balance()`），将任务从高负载 CPU 迁移到低负载 CPU。  
 
@@ -73,14 +74,11 @@ runnable_avg = Σ (RLi * y^i) // 可运行时间的衰减和
 
      ◦ CPU0 的 `load_avg = 2000`，CPU1 的 `load_avg = 500` → 迁移部分任务到 CPU1。  
 
-
 2. 任务放置（新任务唤醒时）  
    • 在 `try_to_wake_up()` 中，选择 `load_avg` 最低的 CPU 放置新唤醒的任务（如 `find_idlest_cpu()`）。  
 
-
 3. 优先级调整（CFS 公平性）  
    • 高 `load_avg` 的任务可能被降低调度优先级（避免独占 CPU）。
-
 
 ---
 
@@ -94,7 +92,6 @@ runnable_avg = Σ (RLi * y^i) // 可运行时间的衰减和
   util_avg = (running_time) / time_decay
   ```
   • 仅统计任务 实际运行时间（不包括就绪未运行的时间）。
-
 
 **触发的调度行为**
 1. CPU 频率调整（DVFS，如 `schedutil` 调速器）  
@@ -115,7 +112,6 @@ runnable_avg = Σ (RLi * y^i) // 可运行时间的衰减和
 3. 实时任务抢占决策  
    • 高 `util_avg` 的 CPU 可能更快触发实时任务（RT/DL）的抢占。
 
-
 ---
 
 **3. `runnable_avg`（可运行状态平均值）**
@@ -129,8 +125,8 @@ runnable_avg = Σ (RLi * y^i) // 可运行时间的衰减和
   ```
   • 统计任务在 就绪队列中的时间（包括等待运行的时间）。
 
-
 **触发的调度行为**
+
 1. CPU 过载检测（Throttling）  
    • 如果 `runnable_avg` 持续高于阈值，可能触发调度限流（如 CFS Bandwidth Control）。  
 
@@ -169,332 +165,198 @@ struct sched_avg {
 * ​period_contrib​​:处理跨周期的时间计算，确保 PELT 的衰减计算正确（避免时间片跨越多个周期导致误差）。
 * util_est​​:用于快速估算利用率（如唤醒任务时），避免实时计算带来的延迟。
 
-### task_group
+## 时间计算
+
+在上面的公式中很多值的计算都用到了时间，这里使用 struct rq 结构体中的 clock 变量用来记录。
+
+### 时钟源
+
+### 归一化处理
+
+对于CPU而言，算力处于比较低的水平的时候，同样的任务量要比高算力状态下花费更多的时间。这样，同样的任务量在不同CPU算力的情况下，PELT会跟踪到不同的结果。为了能达到一致性的评估效果，PELT的时间采用归一化时间，即把执行时间归一化到超大核最高频率上去。
+
+例如：
+
+* CPU 算力降为 50%：delta 缩放为 2 倍（实际耗时更长）
+* CPU 频率降为 70%：delta 缩放为 1/0.7≈1.43 倍
+
+_update_idle_rq_clock_pelt：专门处理 idle 状态的 PELT 时钟更新，通常直接同步到 rq_clock_task。
+时间增量缩放（Delta Scaling）
+
+delta = cap_scale(delta, arch_scale_cpu_capacity(cpu_of(rq)));
+delta = cap_scale(delta, arch_scale_freq_capacity(cpu_of(rq)));
+
+缩放层级：
+
+|缩放类型|               函数 应用场景|
+| ------ | ------ |
+|CPU 算力缩放 |arch_scale_cpu_capacity() big.LITTLE 架构、CPU hotplug|
+|CPU 频率缩放 |arch_scale_freq_capacity() DVFS 调频（如 cpufreq|
+
+数学关系：
+
+  缩放后的 delta 反映 等效于最大算力下的时间：
+
+  $$\text{delta\_scaled} = \text{delta} \times \frac{\text{max\_capacity}}{\text{current\_capacity}} \times \frac{\text{max\_frequency}}{\text{current\_frequency}}$$
+
+clock_pelt 的作用：  
+
+* 作为 PELT 负载跟踪的时间基准，用于计算任务的 util_avg 和 load_avg。缩放后确保：
+低算力 CPU 上运行的任务：负载增长更慢（因为 delta 被放大）。
+
+* 高算力 CPU 上运行的任务：负载增长更快（因为 delta 被缩小）。
+
+实际案例假设一个场景：
+
+CPU 当前算力：最大算力的 50%（arch_scale_cpu_capacity() 返回 512，假设最大为 1024）。
+
+CPU 当前频率：最大频率的 80%（arch_scale_freq_capacity() 返回 819，假设最大为 1024）。
+
+实际运行时间（delta）：10ms。
+
+算力缩放：  
+
+$$\text{delta} = 10 \times \frac{1024}{512} = 20 \text{ms}$$
+频率缩放：  
+
+$$\text{delta} = 20 \times \frac{1024}{819} ≈ 25 \text{ms}$$
+
+最终效果：
+
+虽然任务实际运行了 10ms，但 PELT 会按 25ms 等效时间 更新负载，反映低算力/频率下的真实负载。
+
+设计意义：
+
+* 跨 CPU 一致性：确保不同算力/频率的 CPU 上，相同任务的负载信号可比。
+* DVFS 友好性：频率动态调整时，负载跟踪自动适应。
+* 节能与性能平衡：低算力 CPU 的任务负载增长更慢，避免不必要的迁移。
+
+代码实现：
 
 ```c
-struct task_group {
-	struct cgroup_subsys_state css; // cgroup 子系统状态
+/**
+ * update_rq_clock_pelt - 更新运行队列的 PELT 时钟（考虑 CPU 算力和频率变化）
+ * @rq:   目标运行队列（runqueue）
+ * @delta: 实际经过的物理时间增量（单位：纳秒）
+ *
+ * 功能：在考虑 CPU 算力（capacity）和频率（frequency）动态变化的情况下，
+ *       更新运行队列的 PELT 时钟（clock_pelt），确保负载跟踪（load tracking）
+ *       的准确性。
+ *
+ * 核心逻辑：
+ * 1. 若当前 CPU 处于 idle 状态，调用 _update_idle_rq_clock_pelt 特殊处理。
+ * 2. 对时间增量 delta 进行两层缩放：
+ *    - CPU 算力缩放（arch_scale_cpu_capacity）
+ *    - CPU 频率缩放（arch_scale_freq_capacity）
+ * 3. 将缩放后的时间累加到 rq->clock_pelt。
+ */
+static inline void update_rq_clock_pelt(struct rq *rq, s64 delta)
+{
+    /* 1. 处理 idle 状态：跳过常规缩放逻辑 */
+    if (unlikely(is_idle_task(rq->curr))) {
+        _update_idle_rq_clock_pelt(rq);// 专门处理 idle 状态的 PELT 时钟更新，通常直接同步到 rq_clock_task。
+        return;
+    }
 
-#ifdef CONFIG_GROUP_SCHED_WEIGHT
-	/* 一个正值表示这是一个 SCHED_IDLE 组 */
-	int			idle; // 表示任务组是否为 SCHED_IDLE 组
-#endif
+    /*
+     * 2. 时间增量缩放说明：
+     * --------------------------------------------
+     * 当 CPU 运行在低于最大算力（max capacity）的状态时，
+     * 完成相同工作量需要更长时间。为保证负载跟踪的准确性，
+     * 需对 delta 进行缩放，反映实际完成的工作量。
+     *
+     * 例如：
+     * - CPU 算力降为 50%：delta 缩放为 2 倍（实际耗时更长）
+     * - CPU 频率降为 70%：delta 缩放为 1/0.7≈1.43 倍
+     *
+     * 这种缩放确保 PELT 负载信号在不同算力/频率下具有可比性。
+     */
 
-#ifdef CONFIG_FAIR_GROUP_SCHED
-	/* 此组在每个 CPU 上的可调度实体 */
-	struct sched_entity	**se;
-	/* 此组在每个 CPU 上“拥有”的运行队列 */
-	struct cfs_rq		**cfs_rq;
-	unsigned long		shares; // 任务组的权重
-#ifdef	CONFIG_SMP
-	/*
-	 * load_avg 在时钟滴答时间可能会被大量争用，
-	 * 因此将其放在自己的缓存行中，与上面的字段分开，
-	 * 这些字段也将在每个滴答时访问。
-	 */
-	atomic_long_t		load_avg ____cacheline_aligned; // 任务组的平均负载
-#endif
-#endif
+    /* 2.1 CPU 算力缩放（考虑 big.LITTLE 架构或 CPU hotplug） */
+    delta = cap_scale(delta, arch_scale_cpu_capacity(cpu_of(rq)));
 
-#ifdef CONFIG_RT_GROUP_SCHED
-	struct sched_rt_entity	**rt_se; // 实时调度实体
-	struct rt_rq		**rt_rq; // 实时运行队列
+    /* 2.2 CPU 频率缩放（考虑 DVFS 调频） */
+    delta = cap_scale(delta, arch_scale_freq_capacity(cpu_of(rq)));
 
-	struct rt_bandwidth	rt_bandwidth; // 实时带宽
-#endif
-
-#ifdef CONFIG_EXT_GROUP_SCHED
-	u32			scx_flags;	/* SCX_TG_* 标志 */
-	u32			scx_weight;	/* SCX 权重 */
-#endif
-
-	struct rcu_head		rcu; // RCU 头
-	struct list_head	list; // 任务组列表
-
-	struct task_group	*parent; // 父任务组
-	struct list_head	siblings; // 兄弟任务组
-	struct list_head	children; // 子任务组
-
-#ifdef CONFIG_SCHED_AUTOGROUP
-	struct autogroup	*autogroup; // 自动任务组
-#endif
-
-	struct cfs_bandwidth	cfs_bandwidth; // CFS 带宽
-
-#ifdef CONFIG_UCLAMP_TASK_GROUP
-	/* 用户空间请求的两位小数精度的 [%] 值 */
-	unsigned int		uclamp_pct[UCLAMP_CNT]; // 用户空间请求的利用率限制百分比
-	/* 为任务组请求的限制值 */
-	struct uclamp_se	uclamp_req[UCLAMP_CNT]; // 任务组的请求限制值
-	/* 任务组使用的有效限制值 */
-	struct uclamp_se	uclamp[UCLAMP_CNT]; // 任务组的有效限制值
-#endif
-
-};
-```
-
-task_group 中依赖 se 成员来联系到一个调度实体。一个 task_group 在每一个 cpu 都对应一个 sched_entity 结构并被挂在 cfs_rq 中的红黑树节点上。同时一个 task_group 在每一个 cpu 上都有对应的 cfs_rq 结构体，在该结构体中记录了该调度组内进程的优先级。
-
-### struct sched_entity
-
-sched_entity 用来描述一个调度实例，该结构作为一个节点被挂在 cfs_rq 中的红黑树上。一个调度实例既可以对应一个进程，也可以对应一个进程组。
-
-![alt text](image-2.png)
-
-```c
-struct sched_entity {
-	/* 用于负载均衡: */
-	struct load_weight		load;           // 负载权重
-	struct rb_node			run_node;       // 红黑树节点
-	u64				deadline;       // 截止时间
-	u64				min_vruntime;   // 最小虚拟运行时间
-	u64				min_slice;      // 最小时间片
-
-	struct list_head		group_node;     // 组节点
-	unsigned char			on_rq;          // 是否在运行队列中
-	unsigned char			sched_delayed;  // 调度是否延迟
-	unsigned char			rel_deadline;   // 相对截止时间
-	unsigned char			custom_slice;   // 自定义时间片
-					/* hole */
-
-	u64				exec_start;     // 执行开始时间
-	u64				sum_exec_runtime; // 总执行时间
-	u64				prev_sum_exec_runtime; // 上一次总执行时间
-	u64				vruntime;       // 虚拟运行时间
-	s64				vlag;           // 虚拟滞后
-	u64				slice;          // 时间片
-
-	u64				nr_migrations;  // 迁移次数
-
-#ifdef CONFIG_FAIR_GROUP_SCHED
-	int				depth;          // 调度实体的深度
-	struct sched_entity		*parent;        // 父调度实体
-	/* 调度实体所在的运行队列: */
-	struct cfs_rq			*cfs_rq;        // 关联的CFS运行队列
-	/* 调度实体拥有的运行队列: */
-	struct cfs_rq			*my_q;          // 自己的CFS运行队列
-	/* my_q->h_nr_running的缓存值 */
-	unsigned long			runnable_weight; // 可运行权重
-#endif
-
-#ifdef CONFIG_SMP
-	/*
-	 * 每个调度实体的负载平均值跟踪。
-	 *
-	 * 放入单独的缓存行以避免与上面的只读值冲突。
-	 */
-	struct sched_avg		avg;            // 平均负载
-#endif
-};
-
-```
-
-![alt text](image.png)
-
-### struct cfs_rq
-
-cfs_rq 记录了这个调度组内的调度实例的优先级。在调度时会选取 cfs_rq 中最左边的节点上 cpu。
-
-![alt text](image-1.png)
-
-### struct rq
-
-一个 cpu 对应一个 rq ，在一个 rq 结构体中又记录了不同调度类的根调度层级。
-
-```c
-struct rq {
-	// ......
-	/* 调度相关 */
-	struct cfs_rq		cfs; // 完全公平调度类
-	struct rt_rq		rt; // 实时调度类
-	struct dl_rq		dl; // 截止期调度类
-#ifdef CONFIG_SCHED_CLASS_EXT
-	struct scx_rq		scx; // 扩展调度类
-#endif
-	// ......
-	unsigned int		clock_update_flags; // 时钟更新标志
-	u64			clock; // 当前时钟
-	/* 确保所有时钟在同一缓存行中 */
-	u64			clock_task ____cacheline_aligned; // 任务时钟
-	u64			clock_pelt; // PELT 时钟
-	unsigned long		lost_idle_time; // 丢失的空闲时间
-	u64			clock_pelt_idle; // PELT 空闲时钟
-	u64			clock_idle; // 空闲时钟
-#ifndef CONFIG_64BIT
-	u64			clock_pelt_idle_copy; // PELT 空闲时钟副本
-	u64			clock_idle_copy; // 空闲时钟副本
-#endif
+    /* 3. 更新 PELT 时钟 */
+    rq->clock_pelt += delta;
 }
 ```
 
-### 结构体之间的关系
+### 计算 runnable_time 和 running_time
 
-在该 cfs 调度中有多个结构体，其中 task_group 用来记录调度组。在进程管理初始化时会初始化 root_task_group 在该结构中记录了所有的进程和进程组。而 rq 则是与 cpu 核一一对应，在 rq 中会记录处在顶层的 cfs_rq 。通过 task_group 和 cfs_rq 来记录调度层级。
+通过 PELT 时钟计算任务的 runnable_time 和 running_time：
 
-![alt text](image-3.png)
-
-多层级的调度：
-
-![alt text](image-4.png)
-
-## 计算权重
-
-### nice 值
-
-​​nice 值​​ 用于调整进程的优先级，影响其在 CPU 时间分配中的权重。以下是关于 nice 值的详细解析，包括其作用、计算方式、与 shares 的关系，以及实际应用示例。
-
-nice 值的作用​​：nice 值是一个 ​​-20 到 19​​ 的整数（默认 0），数值越小，优先级越高（占用更多 CPU 时间）。
-
-​​nice = -20​​：最高优先级（抢占更多 CPU）。
-
-​​nice = 19​​：最低优先级（让出 CPU 时间）。
-
-Linux 内核使用 ​​静态映射表​​（sched_prio_to_weight）将 nice 值转换为权重：
+|任务状态| 时间增量归属| 更新逻辑 |
+| ------ | ------ | ------ |
+| ​正在运行​​ |running_time|任务在 CPU 上执行时，物理时间直接计入 running_time。|
+| 可运行 |runnable_time| 任务在运行队列中等待时，时间计入 runnable_time（通过 update_rq_clock_pelt 间接统计）。|
+|​​阻塞/睡眠​|无（不统计）|时间不归属任何任务，但可能触发 util_avg 的衰减。|
 
 ```c
-/*
- * nice 值是乘法关系，每改变一个 nice 等级，CPU 时间分配会有一个温和的 10% 变化。
- * 例如，当一个 CPU 密集型任务从 nice 0 变为 nice 1 时，它将比另一个保持在 nice 0 的
- * CPU 密集型任务少获得约 10% 的 CPU 时间。
- *
- * 这种“10% 效应”是相对且累积的：从任意 nice 等级开始，如果上升 1 个等级，
- * CPU 使用率减少约 10%；如果下降 1 个等级，CPU 使用率增加约 10%。
- * （为了实现这一点，我们使用了 1.25 的乘数。如果一个任务增加约 10%，
- * 而另一个任务减少约 10%，那么它们之间的相对差距约为 25%。）
- */
-const int sched_prio_to_weight[40] = {
- /* -20 */     88761,     71755,     56483,     46273,     36291,
- /* -15 */     29154,     23254,     18705,     14949,     11916,
- /* -10 */      9548,      7620,      6100,      4904,      3906,
- /*  -5 */      3121,      2501,      1991,      1586,      1277,
- /*   0 */      1024,       820,       655,       526,       423,
- /*   5 */       335,       272,       215,       172,       137,
- /*  10 */       110,        87,        70,        56,        45,
- /*  15 */        36,        29,        23,        18,        15,
-};
-```
-
-### 计算 Task se 权重
-
-对于task se而言，load weight是明确的，该值是和se的nice value有对应关系。通过下面的公式获得：schd_prio_to_weight[nice]
-
-设置权重：
-
-```
-sched_fork set_load_weight 
-```
-
-```c
-void set_load_weight(struct task_struct *p, bool update_load)
+static s64 update_curr_se(struct rq *rq, struct sched_entity *curr)
 {
-	// 获取任务的优先级，静态优先级减去实时优先级的最大值
-	int prio = p->static_prio - MAX_RT_PRIO;
-	struct load_weight lw;
+	u64 now = rq_clock_task(rq);
+	s64 delta_exec;
 
-	// 如果任务具有空闲策略
-	if (task_has_idle_policy(p)) {
-		// 设置权重为空闲优先级的权重
-		lw.weight = scale_load(WEIGHT_IDLEPRIO);
-		// 设置反权重为空闲优先级的反权重
-		lw.inv_weight = WMULT_IDLEPRIO;
-	} else {
-		// 根据优先级设置权重和反权重
-		lw.weight = scale_load(sched_prio_to_weight[prio]);
-		lw.inv_weight = sched_prio_to_wmult[prio];
+	delta_exec = now - curr->exec_start;
+	if (unlikely(delta_exec <= 0))
+		return delta_exec;
+
+	curr->exec_start = now;
+	curr->sum_exec_runtime += delta_exec;
+
+	if (schedstat_enabled()) {
+		struct sched_statistics *stats;
+
+		stats = __schedstats_from_se(curr);
+		__schedstat_set(stats->exec_max,
+				max(delta_exec, stats->exec_max));
 	}
 
-	/*
-	 * 如果需要更新负载，并且调度类支持重新设置任务权重，
-	 * 则调用调度类的 reweight_task 方法更新任务的负载。
-	 * 否则，直接设置任务的负载权重。
-	 */
-	if (update_load && p->sched_class->reweight_task)
-		p->sched_class->reweight_task(task_rq(p), p, &lw);
-	else
-		p->se.load = lw;
+	return delta_exec;
 }
 ```
-
-### 计算 Task group se 权重
-
-
-**负载权重计算公式演进**
-
-**1. 理想情况下的精确公式**
-```math
-ge\text{->load.weight} = \frac{tg\text{->weight} \times grq\text{->load.weight}}{\sum grq\text{->load.weight}} \quad \text{(1)}
-```
-• 问题：计算总和（Σ）开销过大。
-
-
----
-
-**2. 近似替代方案**
-用慢速变化的平均值（`grq->avg.load_avg`）替代实时权重：
-```math
-grq\text{->load.weight} \rightarrow grq\text{->avg.load\_avg} \quad \text{(2)}
-```
-得到近似公式：
-```math
-ge\text{->load.weight} = \frac{tg\text{->weight} \times grq\text{->avg.load\_avg}}{tg\text{->load\_avg}} \quad \text{(3)}
-```
-其中：  
-`tg->load_avg ≈ Σ grq->avg.load_avg`（即 `shares_avg`）。
-
-• 优点：计算更高效稳定。  
-
-• 缺点：平均值响应慢，导致边界条件（如空闲组启动任务时）出现瞬态延迟。
-
-
----
-
-**3. 特殊情况（UP 场景）**
-当其他 CPU 均空闲时，总和坍缩为当前 CPU 的权重：
-```math
-ge\text{->load.weight} = \frac{tg\text{->weight} \times grq\text{->load.weight}}{grq\text{->load.weight}} = tg\text{->weight} \quad \text{(4)}
-```
-
----
-
-**4. 改进的混合公式**
-结合 (3) 和 (4)，在接近 UP 场景时动态调整：
-```math
-ge\text{->load.weight} = \frac{tg\text{->weight} \times grq\text{->load.weight}}{tg\text{->load\_avg} - grq\text{->avg.load\_avg} + grq\text{->load.weight}} \quad \text{(5)}
-```
-
-• 问题：`grq->load.weight` 可能为 0 导致除零错误。
-
-
----
-
-**5. 最终修正公式**
-使用 `grq->avg.load_avg` 作为下限：
-```math
-ge\text{->load.weight} = \frac{tg\text{->weight} \times grq\text{->load.weight}}{tg\text{->load\_avg'}} \quad \text{(6)}
-```
-其中：  
-`tg->load_avg' = max(tg->load_avg - grq->avg.load_avg, grq->avg.load_avg) + grq->load.weight`
-
----
-
-**关键设计思想**
-1. 性能与精度平衡  
-   用平均值（`load_avg`）替代实时值（`load.weight`）降低计算开销。
-2. 边界条件处理  
-   在 UP 场景下回归精确计算，避免瞬态延迟。
-3. 数值安全  
-   通过下限保护防止除零错误。
-
----
-
-**应用场景**
-
-* CPU 负载均衡：在 CFS 调度器中动态分配任务权重。  
-* 低延迟优化：快速响应新任务启动（如从空闲状态唤醒）。
-
-初始化过程：
-
-![alt text](image-5.png)
 
 ## 计算负载
 
+## PELT 如何影响 CFS 调度决策​
+
+### 动态调整任务权重
+
+场景：任务优先级（nice 值）或 CGroup 的 cpu.shares 被修改时。  
+
+PELT 通过 calc_group_shares() 基于 load_avg 动态调整任务组的权重。  
+
+调用 reweight_entity() 更新任务的 vruntime 和 deadline，保持公平性。  
+
+代码路径：  
+
+> reweight_task_fair() -> calc_group_shares() -> reweight_entity() -> reweight_eevdf()
+
+### 唤醒任务时的补偿
+
+场景：任务从睡眠状态唤醒时。  
+
+PELT 根据 runnable_avg（反映历史活跃性）决定是否补偿 vruntime。  
+
+避免长时间睡眠的任务因 vruntime 过小而垄断 CPU。  
+
+公式：  
+
+    if (se->avg.runnable_avg < sysctl_sched_min_granularity)
+      vruntime -= compensation;  // 补偿滞后量
+
+### 时间片分配
+
+场景：CFS 分配任务的时间片（time slice）。  
+
+PELT 参与时间片长度与任务权重成正比，权重由 load_avg 间接影响。  
+
+公式：
+
+$$\text{slice} = \frac{\text{schedperiod} \times \text{weight}}{\text{总权重}}$$
+代码路径：
+
+> sched_slice() -> calc_delta_fair()
+  
