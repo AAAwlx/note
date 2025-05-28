@@ -276,7 +276,6 @@ void set_load_weight(struct task_struct *p, bool update_load)
 
 ### 计算 Task group se 权重
 
-
 **负载权重计算公式演进**
 
 **1. 理想情况下的精确公式**
@@ -347,10 +346,6 @@ $$
 * CPU 负载均衡：在 CFS 调度器中动态分配任务权重。  
 * 低延迟优化：快速响应新任务启动（如从空闲状态唤醒）。
 
-初始化过程：
-
-![alt text](image-5.png)
-
 代码实现：
 
 ```c
@@ -404,3 +399,12 @@ static long calc_group_shares(struct cfs_rq *cfs_rq)
 
 ```
 
+初始化过程：
+
+![alt text](image-5.png)
+
+任务的出队入队
+
+当任务刚被唤醒 负载均衡 新建 时间片耗尽，需要入队
+
+![Alt text](cfs%E5%87%BA%E9%98%9F%E5%85%A5%E9%98%9F.png)

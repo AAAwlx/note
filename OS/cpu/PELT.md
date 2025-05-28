@@ -328,11 +328,11 @@ static s64 update_curr_se(struct rq *rq, struct sched_entity *curr)
 
 PELT 通过 calc_group_shares() 基于 load_avg 动态调整任务组的权重。  
 
-调用 reweight_entity() 更新任务的 vruntime 和 deadline，保持公平性。  
-
 代码路径：  
 
-> reweight_task_fair() -> calc_group_shares() -> reweight_entity() -> reweight_eevdf()
+> reweight_task_fair() -> update_cfs_group -> calc_group_shares()
+
+在 calc_group_shares 函数中会使用 cfs_rq 的 load_avg 来作为负载对任务权值进行调整，确保让对 CPU 需要更多的任务在 CPU 上运行更长的时间。
 
 ### 唤醒任务时的补偿
 
