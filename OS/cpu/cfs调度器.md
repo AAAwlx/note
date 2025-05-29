@@ -66,12 +66,11 @@ $${vruntime} += \cfrac{实际执行时间\times NICELOAD}{任务权重} $$
 
 在该 cfs 调度中有多个结构体，其中 task_group 用来记录调度组。在进程管理初始化时会初始化 root_task_group 在该结构中记录了所有的进程和进程组。而 rq 则是与 cpu 核一一对应，在 rq 中会记录处在顶层的 cfs_rq 。通过 task_group 和 cfs_rq 来记录调度层级。
 
-![alt text](image-3.png)
+![alt text](../image/cfs调度结构体.png)
 
 多层级的调度：
 
-![alt text](image-4.png)
-
+![alt text](../image/cfs多层级调度.png)
 
 ### task_group
 
@@ -143,7 +142,7 @@ task_group 中依赖 se 成员来联系到一个调度实体。一个 task_group
 
 sched_entity 用来描述一个调度实例，该结构作为一个节点被挂在 cfs_rq 中的红黑树上。一个调度实例既可以对应一个进程，也可以对应一个进程组。
 
-![alt text](image-2.png)
+![alt text](../image/sched_entity.png)
 
 ```c
 struct sched_entity {
@@ -193,13 +192,13 @@ struct sched_entity {
 
 ```
 
-![alt text](image.png)
+![alt text](../image/sched_entity结构体.png)
 
 ### struct cfs_rq
 
 cfs_rq 记录了这个调度组内的调度实例的优先级。在调度时会选取 cfs_rq 中最左边的节点上 cpu 即虚拟时间比较小的值。
 
-![alt text](image-1.png)
+![alt text](../image/cfs_rq.png)
 
 ### struct rq
 
@@ -346,7 +345,7 @@ $$
 * CPU 负载均衡：在 CFS 调度器中动态分配任务权重。  
 * 低延迟优化：快速响应新任务启动（如从空闲状态唤醒）。
 
-代码实现：
+这里是动态权重的一个计算的代码实现：
 
 ```c
 /**
@@ -401,10 +400,10 @@ static long calc_group_shares(struct cfs_rq *cfs_rq)
 
 初始化过程：
 
-![alt text](image-5.png)
+![alt text](../image/初始化权重.png)
 
 任务的出队入队
 
 当任务刚被唤醒 负载均衡 新建 时间片耗尽，需要入队
 
-![Alt text](cfs%E5%87%BA%E9%98%9F%E5%85%A5%E9%98%9F.png)
+![Alt text](../image/cfs出队入队.png)
