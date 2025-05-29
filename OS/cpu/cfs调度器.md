@@ -402,6 +402,19 @@ static long calc_group_shares(struct cfs_rq *cfs_rq)
 
 ![alt text](../image/初始化权重.png)
 
+## 计算 vruntime 和 runtime
+
+|函数名称	|功能描述|
+| ------ | ------ |
+|update_curr()|	更新当前任务的 runtime 和 vruntime。|
+|calc_delta_fair()|	根据任务权重计算虚拟时间增量。|
+|avg_vruntime()|	计算运行队列的平均虚拟时间，用于初始化任务的 vruntime。|
+|entity_before()	|比较两个任务的 vruntime，决定调度顺序。|
+|account_cfs_rq_runtime()|	扣减任务的运行时间配额，并检查是否需要限制任务。|
+|throttle_cfs_rq()	|如果任务超出运行时间配额，限制任务的运行。|
+
+
+
 任务的出队入队
 
 当任务刚被唤醒 负载均衡 新建 时间片耗尽，需要入队
