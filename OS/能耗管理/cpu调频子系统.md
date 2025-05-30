@@ -380,7 +380,7 @@ static int __init set_cpufreq_governor_init(void)
 }
 ```
 
-调用链路：cpufreq_set_policy cpufreq_init_governor policy->governor->init 
+调用链路：cpufreq_set_policy -> cpufreq_init_governor policy->governor->init 
 
 ```c
 static int cpufreq_init_governor(struct cpufreq_policy *policy)

@@ -2,7 +2,7 @@
 
 ## 概念
 
-CFS调度器，完全公平调度器，采用完全公平调度算法，引入虚拟运行时间概念。cfs 调度的理念为让所有任务在cpu上运行的虚拟时间趋于一致。
+CFS调度器，完全公平调度器，采用完全公平调度算法，引入虚拟运行时间概念。cfs 调度的理念为让所有任务在cpu上运行的虚拟时间趋于一致。在这里所有的进程会被赋予相同的虚拟时间，而实际运行的时间则取决于任务的权重。
 
 ### nice 值
 
@@ -59,6 +59,50 @@ $${vruntime} += \cfrac{实际执行时间\times NICELOAD}{任务权重} $$
 * ​任务权重​​：根据任务的 nice 值动态计算的权重值
 
 ​​任务权重​​：由任务的优先级（nice 值）决定，优先级越高（nice 值越小），权重越大（例如 nice=0 时权重=1024，nice=-5 时权重≈2048）。当两个任务运行在cpu上的时间相同时，权重越大任务的虚拟运行时间越少，更容易再次被调度上cpu,同时也能获得更多的实际cpu使用时间。
+
+在这里最终会调用到 __calc_delta 函数进行计算。
+
+```c
+/*
+ * delta_exec * weight / lw.weight
+ *   或者
+ * (delta_exec * (weight * lw->inv_weight)) >> WMULT_SHIFT
+ *
+ * 如果 weight := NICE_0_LOAD 并且 lw \e sched_prio_to_wmult[]，那么我们可以保证 shift 保持为正值，
+ * 因为 inv_weight 保证适合 32 位，并且 NICE_0_LOAD 提供了额外的 10 位；因此 shift >= 22。
+ *
+ * 或者，weight <= lw.weight（因为 lw.weight 是运行队列的权重），因此 weight/lw.weight <= 1，
+ * 因此我们的 shift 也将是正值。
+ */
+static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight *lw)
+{
+	u64 fact = scale_load_down(weight); // 将权重缩放到较小范围
+	u32 fact_hi = (u32)(fact >> 32);    // 获取高位部分
+	int shift = WMULT_SHIFT;            // 初始移位值
+	int fs;
+
+	__update_inv_weight(lw); // 更新 lw 的逆权重
+
+	// 如果 fact 的高位部分非零，调整移位值
+	if (unlikely(fact_hi)) {
+		fs = fls(fact_hi); // 找到最高有效位
+		shift -= fs;       // 减去移位值
+		fact >>= fs;       // 右移 fact
+	}
+
+	fact = mul_u32_u32(fact, lw->inv_weight); // 计算 fact 和逆权重的乘积
+
+	fact_hi = (u32)(fact >> 32); // 再次获取高位部分
+	if (fact_hi) {
+		fs = fls(fact_hi); // 找到最高有效位
+		shift -= fs;       // 减去移位值
+		fact >>= fs;       // 右移 fact
+	}
+
+	// 计算最终结果并返回
+	return mul_u64_u32_shr(delta_exec, fact, shift);
+}
+```
 
 ## 常用的结构体
 
@@ -402,21 +446,138 @@ static long calc_group_shares(struct cfs_rq *cfs_rq)
 
 ![alt text](../image/初始化权重.png)
 
-## 计算 vruntime 和 runtime
+## cfs 调度类的方法
 
-|函数名称	|功能描述|
-| ------ | ------ |
-|update_curr()|	更新当前任务的 runtime 和 vruntime。|
-|calc_delta_fair()|	根据任务权重计算虚拟时间增量。|
-|avg_vruntime()|	计算运行队列的平均虚拟时间，用于初始化任务的 vruntime。|
-|entity_before()	|比较两个任务的 vruntime，决定调度顺序。|
-|account_cfs_rq_runtime()|	扣减任务的运行时间配额，并检查是否需要限制任务。|
-|throttle_cfs_rq()	|如果任务超出运行时间配额，限制任务的运行。|
+在不同的调度类中都会注册自己的方法集，下面是 cfs 调度器注册的方法。
 
+```c
+DEFINE_SCHED_CLASS(fair) = {
 
+	.enqueue_task		= enqueue_task_fair,       // 将任务加入就绪队列
+	.dequeue_task		= dequeue_task_fair,       // 从就绪队列中移除任务
+	.yield_task		= yield_task_fair,         // 当前任务主动让出 CPU
+	.yield_to_task		= yield_to_task_fair,      // 当前任务让出 CPU 给指定任务
 
-任务的出队入队
+	.wakeup_preempt		= check_preempt_wakeup_fair, // 检查是否需要抢占当前任务
 
-当任务刚被唤醒 负载均衡 新建 时间片耗尽，需要入队
+	.pick_task		= pick_task_fair,          // 从就绪队列中选择任务
+	.pick_next_task		= __pick_next_task_fair,   // 选择下一个要运行的任务
+	.put_prev_task		= put_prev_task_fair,      // 保存当前任务的状态
+	.set_next_task          = set_next_task_fair,     // 设置下一个要运行的任务
+
+#ifdef CONFIG_SMP
+	.balance		= balance_fair,            // 负载均衡
+	.select_task_rq		= select_task_rq_fair,     // 选择任务运行的 CPU
+	.migrate_task_rq	= migrate_task_rq_fair,    // 迁移任务到其他 CPU
+
+	.rq_online		= rq_online_fair,          // 处理运行队列上线
+	.rq_offline		= rq_offline_fair,         // 处理运行队列下线
+
+	.task_dead		= task_dead_fair,          // 处理任务结束
+	.set_cpus_allowed	= set_cpus_allowed_fair,   // 设置任务允许运行的 CPU 集合
+#endif
+
+	.task_tick		= task_tick_fair,          // 时钟中断处理
+	.task_fork		= task_fork_fair,          // 处理任务创建
+
+	.reweight_task		= reweight_task_fair,      // 调整任务权重
+	.prio_changed		= prio_changed_fair,       // 处理任务优先级变化
+	.switched_from		= switched_from_fair,      // 从其他调度类切换到当前调度类
+	.switched_to		= switched_to_fair,        // 从当前调度类切换到其他调度类
+
+	.get_rr_interval	= get_rr_interval_fair,    // 获取任务的时间片长度
+
+	.update_curr		= update_curr_fair,        // 更新当前任务的运行时间
+
+#ifdef CONFIG_FAIR_GROUP_SCHED
+	.task_change_group	= task_change_group_fair,  // 处理任务组的变化
+#endif
+
+#ifdef CONFIG_SCHED_CORE
+	.task_is_throttled	= task_is_throttled_fair,  // 检查任务是否被限制
+#endif
+
+#ifdef CONFIG_UCLAMP_TASK
+	.uclamp_enabled		= 1,                      // 启用任务的 uclamp 功能
+#endif
+};
+```
+
+### 对中断进行处理
+
+task_tick_fair 函数主要用于处理中断函数。
+
+* 更新运行时的各类统计信息，比如vruntime， 运行时间、负载值、权重值等。
+* 检查是否需要抢占，主要是比较运行时间是否耗尽，以及vruntime的差值是否大于运行时间等。
+
+![alt text](cfs中断处理.png)
+
+update_curr 函数中的更新：
+
+![alt text](image.png)
+
+```c
+static void update_curr(struct cfs_rq *cfs_rq)
+{
+	struct sched_entity *curr = cfs_rq->curr; // 当前调度实体
+	struct rq *rq = rq_of(cfs_rq); // 获取运行队列
+	s64 delta_exec; // 记录执行时间的变化量
+	bool resched; // 是否需要重新调度
+
+	if (unlikely(!curr)) // 如果当前调度实体为空，直接返回
+		return;
+
+	// 更新当前调度实体的执行时间
+	delta_exec = update_curr_se(rq, curr);
+	if (unlikely(delta_exec <= 0)) // 如果执行时间变化量小于等于0，直接返回
+		return;
+
+	// 更新虚拟运行时间
+	curr->vruntime += calc_delta_fair(delta_exec, curr);
+	// 更新任务的截止时间
+	resched = update_deadline(cfs_rq, curr);
+	// 更新最小虚拟运行时间
+	update_min_vruntime(cfs_rq);
+
+	if (entity_is_task(curr)) { // 如果当前调度实体是一个任务
+		struct task_struct *p = task_of(curr); // 获取任务结构
+
+		// 更新任务的运行时统计信息
+		update_curr_task(p, delta_exec);
+
+		/*
+		 * 如果公平服务器(fair_server)处于活动状态，无论任务是否代表公平服务器运行，
+		 * 都需要对公平服务器时间进行统计：
+		 *  - 如果任务代表公平服务器运行，需要根据分配的运行时间限制其时间。
+		 *  - 如果公平任务在公平服务器之外运行，也需要对公平服务器进行时间统计，
+		 *    以便公平服务器可以记录这段时间并可能避免在本周期内运行。
+		 */
+		if (dl_server_active(&rq->fair_server))
+			dl_server_update(&rq->fair_server, delta_exec);
+	}
+
+	// 记录CFS运行队列的运行时间
+	account_cfs_rq_runtime(cfs_rq, delta_exec);
+
+	// 如果运行队列中只有一个任务，直接返回
+	if (cfs_rq->nr_queued == 1)
+		return;
+
+	// 如果需要重新调度或者发生短时间抢占
+	if (resched || did_preempt_short(cfs_rq, curr)) {
+		// 懒惰地重新调度当前任务
+		resched_curr_lazy(rq);
+		// 清除当前任务的伙伴关系
+		clear_buddies(cfs_rq, curr);
+	}
+}
+```
+
+### 任务的出队入队
+
+* 当任务进入可运行状态时，需要将调度实体放入到红黑树中，完成入队操作
+* 当任务退出可运行状态时，需要将调度实体从红黑树中移除，完成出队操作
+
+每次入队时需要调整虚拟运行时间，防止新入队的任务因为虚拟运行时间比较小，导致总是新任务被调度上 cpu 进而引起老任务的饥饿。
 
 ![Alt text](../image/cfs出队入队.png)
