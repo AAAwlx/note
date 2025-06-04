@@ -510,11 +510,11 @@ task_tick_fair 函数主要用于处理中断函数。
 * 更新运行时的各类统计信息，比如vruntime， 运行时间、负载值、权重值等。
 * 检查是否需要抢占，主要是比较运行时间是否耗尽，以及vruntime的差值是否大于运行时间等。
 
-![alt text](cfs中断处理.png)
+![alt text](../image/cfs中断处理.png)
 
 update_curr 函数中的更新：
 
-![alt text](image.png)
+![alt text](../image/三阶段处理.png)
 
 ```c
 static void update_curr(struct cfs_rq *cfs_rq)
@@ -573,6 +573,53 @@ static void update_curr(struct cfs_rq *cfs_rq)
 }
 ```
 
+计算虚拟运行时间：
+
+delta_exec * weight / lw.weight 或者 (delta_exec * (weight * lw->inv_weight)) >> WMULT_SHIFT,这里 weight = 1024 或小于 1024 。
+
+```c
+/*
+ * weight = 1024
+ * delta_exec * weight / lw.weight
+ *   或者
+ * (delta_exec * (weight * lw->inv_weight)) >> WMULT_SHIFT
+ *
+ * 如果 weight := NICE_0_LOAD 并且 lw \e sched_prio_to_wmult[]，那么我们可以保证 shift 保持为正值，
+ * 因为 inv_weight 保证适合 32 位，并且 NICE_0_LOAD 提供了额外的 10 位；因此 shift >= 22。
+ *
+ * 或者，weight <= lw.weight（因为 lw.weight 是运行队列的权重），因此 weight/lw.weight <= 1，
+ * 因此我们的 shift 也将是正值。
+ */
+static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight *lw)
+{
+	u64 fact = scale_load_down(weight); // 将权重缩放到较小范围
+	u32 fact_hi = (u32)(fact >> 32);    // 获取高位部分
+	int shift = WMULT_SHIFT;            // 初始移位值
+	int fs;
+
+	__update_inv_weight(lw); // 更新 lw 的逆权重
+
+	// 如果 fact 的高位部分非零，调整移位值
+	if (unlikely(fact_hi)) {
+		fs = fls(fact_hi); // 找到最高有效位
+		shift -= fs;       // 减去移位值
+		fact >>= fs;       // 右移 fact
+	}
+
+	fact = mul_u32_u32(fact, lw->inv_weight); // 计算 fact 和逆权重的乘积
+
+	fact_hi = (u32)(fact >> 32); // 再次获取高位部分
+	if (fact_hi) {
+		fs = fls(fact_hi); // 找到最高有效位
+		shift -= fs;       // 减去移位值
+		fact >>= fs;       // 右移 fact
+	}
+
+	// 计算最终结果并返回
+	return mul_u64_u32_shr(delta_exec, fact, shift);
+}
+```
+
 ### 任务的出队入队
 
 * 当任务进入可运行状态时，需要将调度实体放入到红黑树中，完成入队操作
@@ -581,3 +628,46 @@ static void update_curr(struct cfs_rq *cfs_rq)
 每次入队时需要调整虚拟运行时间，防止新入队的任务因为虚拟运行时间比较小，导致总是新任务被调度上 cpu 进而引起老任务的饥饿。
 
 ![Alt text](../image/cfs出队入队.png)
+
+### 任务的创建
+
+在父进程通过fork创建子进程的时候，task_fork_fair函数会被调用，这个函数的传入参数是子进程的task_struct。该函数的主要作用，就是确定子任务的vruntime，因此也能确定子任务的调度实体在红黑树RB中的位置。
+
+![alt text](../image/任务的创建.png)
+
+### 调整权重
+
+```c
+void set_load_weight(struct task_struct *p, bool update_load)
+{
+	// 获取任务的优先级，静态优先级减去实时优先级的最大值
+	int prio = p->static_prio - MAX_RT_PRIO;
+	struct load_weight lw;
+
+	// 如果任务具有空闲策略
+	if (task_has_idle_policy(p)) {
+		// 设置权重为空闲优先级的权重
+		lw.weight = scale_load(WEIGHT_IDLEPRIO);
+		// 设置反权重为空闲优先级的反权重
+		lw.inv_weight = WMULT_IDLEPRIO;
+	} else {
+		// 根据优先级设置权重和反权重
+		lw.weight = scale_load(sched_prio_to_weight[prio]);
+		lw.inv_weight = sched_prio_to_wmult[prio];
+	}
+
+	/*
+	 * 如果需要更新负载，并且调度类支持重新设置任务权重，
+	 * 则调用调度类的 reweight_task 方法更新任务的负载。
+	 * 否则，直接设置任务的负载权重。
+	 */
+	if (update_load && p->sched_class->reweight_task)
+		p->sched_class->reweight_task(task_rq(p), p, &lw);
+	else
+		p->se.load = lw;
+}
+```
+
+## CFS存在的缺陷
+
+CFS 无法处理进程对延迟要求。比如：一些进程可能不需要大量的 CPU 时间，但是当它们能执行时需要很快响应速度，另一些进程可能会需要更多的 CPU 时间，但它们可以等待对延迟不敏感； CFS调度器没有给进程提供一种表达其延时延需求的方法。虽然nice可用于为进程提供更多 CPU 时间，但这和上面的时延需求不是同样的事情。 当然RT调度类可用于延迟有要求的任务，但RT任务是一个特权行为，不当的设置会严重影响系统其他任务的运行。
