@@ -1,0 +1,166 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36" version="27.1.4">
+  <diagram name="第 1 页" id="fVzlgAn1xPvSzIzErJie">
+    <mxGraphModel dx="1714" dy="572" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="BUetxWv4FVDVSdDQajOW-43" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-1" target="BUetxWv4FVDVSdDQajOW-2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-45" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-1" target="BUetxWv4FVDVSdDQajOW-4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-46" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-1" target="BUetxWv4FVDVSdDQajOW-3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-47" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-1" target="BUetxWv4FVDVSdDQajOW-34">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-1" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;sched_balance_rq&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="-370" y="545" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-2" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;should_we_balance&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="-70" y="330" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-30" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-3" target="BUetxWv4FVDVSdDQajOW-8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-31" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-3" target="BUetxWv4FVDVSdDQajOW-9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-3" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;sched_balance_find_src_group&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="-70" y="460" width="260" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-4" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;sched_balance_find_src_rq&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="-70" y="620" width="240" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-5" value="检查是否需要进行负载均衡" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="-70" y="300" width="170" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-27" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-8" target="BUetxWv4FVDVSdDQajOW-12">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-28" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-8" target="BUetxWv4FVDVSdDQajOW-13">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-8" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;update_sd_lb_stats&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="235" y="395" width="180" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-29" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-9" target="BUetxWv4FVDVSdDQajOW-25">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-9" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;calculate_imbalance&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="235" y="525" width="190" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-11" value="计算需要迁移的任务量" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="255" y="500" width="140" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-12" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;update_sg_lb_stats&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="480" y="360" width="180" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-13" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;update_sd_pick_busiest&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="480" y="430" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-14" value="更新当前调度组的负载统计" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="485" y="340" width="170" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-15" value="计算当前调度域层级的负载统计信息" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="210" y="370" width="220" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-18" value="寻找需要迁移任务的源调度组" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="-30" y="430" width="180" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-23" value="更新最忙组信息" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="515" y="400" width="110" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-24" value="调整NUMA架构下的负载不平衡阈值" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="480" y="503" width="210" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-25" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;adjust_numa_imbalance&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="482.5" y="525" width="205" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-32" value="在调度组内寻找最繁忙的运行队列" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="-50" y="590" width="200" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-33" value="&lt;div style=&quot;color: rgb(204, 204, 204); background-color: rgb(31, 31, 31); font-family: Menlo, Monaco, &amp;quot;Courier New&amp;quot;, monospace; font-weight: normal; font-size: 12px; line-height: 18px; white-space: pre;&quot;&gt;&lt;br&gt;&lt;/div&gt;" style="text;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="-10" y="760" width="240" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-40" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-34" target="BUetxWv4FVDVSdDQajOW-35">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-41" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-34" target="BUetxWv4FVDVSdDQajOW-36">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-42" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-34" target="BUetxWv4FVDVSdDQajOW-37">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-57" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-34" target="BUetxWv4FVDVSdDQajOW-54">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-64" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-34" target="BUetxWv4FVDVSdDQajOW-63">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-34" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;if (busiest-&amp;gt;nr_running &amp;gt; 1)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="-70" y="890" width="240" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-35" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;detach_tasks&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="255" y="720" width="130" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-36" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;attach_tasks&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="255" y="800" width="130" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-39" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-37" target="BUetxWv4FVDVSdDQajOW-38">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-37" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;if (env.flags &amp;amp; LBF_NEED_BREAK)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="255" y="890" width="235" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-53" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-38" target="BUetxWv4FVDVSdDQajOW-52">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-38" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;env.flags &amp;amp;= ~LBF_NEED_BREAK&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="550" y="890" width="190" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-48" value="开始迁移任务" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry y="865" width="100" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-49" value="从busiest队列分离任务" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="250" y="695" width="150" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-50" value="将任务转移到this_rq目标队列" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="230" y="780" width="180" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-51" value="多轮次迁移控制" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="317.5" y="860" width="110" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-52" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;more_balance&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="810" y="890" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-56" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-54" target="BUetxWv4FVDVSdDQajOW-55">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-54" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;if ((env.flags &amp;amp; LBF_DST_PINNED) &amp;amp;&amp;amp; env.imbalance &amp;gt; 0)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="255" y="990" width="355" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-60" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="BUetxWv4FVDVSdDQajOW-55" target="BUetxWv4FVDVSdDQajOW-58">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-55" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;__cpumask_clear_cpu&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="680" y="990" width="190" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-58" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;more_balance&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="940" y="990" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-61" value="防止通过 env 的 CPUs 重新选择 dst_cpu" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="655" y="960" width="240" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-62" value="重新访问无法迁移到 dst_cpu 的 src_cpu 上的任务" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="287.5" y="960" width="290" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="BUetxWv4FVDVSdDQajOW-63" value="&lt;font style=&quot;font-size: 18px;&quot;&gt;if (unlikely(env.flags &amp;amp; LBF_ALL_PINNED))&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="255" y="1080" width="235" height="40" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
