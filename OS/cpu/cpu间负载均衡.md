@@ -315,9 +315,9 @@ out:
 
 在 cpu 需要进行任务切换时，会选择下一个需要被调度上 CPU 的任务。这里的任务后首先从当前 CPU 的 rq 中选择，如果当前 CPU 的可运行任务队列中已经没有任务可以运行。那么就会触发负载均衡从其他繁忙的 CPU 上来取任务来执行。
 
->pick_next_task_fair -> sched_balance_newidle
+>pick_next_task_fair -> sched_balance_newidle -> sched_balance_rq
 
-如果拉取到任务，pick_next_task_fair会重新pick task，将拉取到的task调度上去。
+如果拉取到任务，pick_next_task_fair 会重新 pick task，将拉取到的task调度上去。
 
 ```c
 static int sched_balance_newidle(struct rq *this_rq, struct rq_flags *rf)
@@ -451,18 +451,17 @@ out:
 }
 ```
 
-### 负载均衡的核心函数 sched_balance_rq
+## 负载均衡的核心函数 sched_balance_rq
 
 负载均衡的核心函数为 sched_balance_rq。
 
 在该函数中进行了如下工作：
 
+![alt text](../image/sched_balance_rq.png)
 
-![alt text](image-2.png)
+### 1.判断当前 CPU 是否需要进行负载均衡 
 
-#### 判断是否需要进行负载均衡 should_we_balance
-
-检查是否需要进行负载均衡，这里需要检查以下几个场景
+由函数 should_we_balance 检查是否需要进行负载均衡，这里需要检查以下几个场景
 
 |场景 | 触发条件 | 典型触发路径 | 优先级 |
 |----|----|----|----|
@@ -471,9 +470,95 @@ out:
 |部分空闲SMT核心| SMT域中核心有忙碌线程，当前是第一个空闲SMT| SMT层均衡| 中|
 |组首选CPU| 无其他匹配条件，当前CPU是组内首选| 热插拔/隔离后的回退机制| 低|
 
-#### 寻找需要迁移任务的源调度组
+```c
+static int should_we_balance(struct lb_env *env)
+{
+    // 获取每CPU变量，用于临时存储需要检查的CPU掩码
+    struct cpumask *swb_cpus = this_cpu_cpumask_var_ptr(should_we_balance_tmpmask);
+    struct sched_group *sg = env->sd->groups; // 当前调度组的第一个组
+    int cpu, idle_smt = -1; // idle_smt记录忙碌核心中的第一个空闲SMT CPU
 
-使用 group_type 来表示调度组现在忙的状态
+    /*
+     * 环境一致性检查：当软中断触发期间发生CPU热插拔时，
+     * 目标CPU可能已被移出均衡集合
+     */
+    if (!cpumask_test_cpu(env->dst_cpu, env->cpus))
+        return 0;
+
+    //新空闲(CPU_NEWLY_IDLE)场景的特殊处理：
+    if (env->idle == CPU_NEWLY_IDLE) {
+        if (env->dst_rq->nr_running > 0 || env->dst_rq->ttwu_pending)
+            return 0;
+        return 1; // 满足新空闲均衡条件
+    }
+
+    /* 常规负载均衡场景的处理逻辑 */
+    cpumask_copy(swb_cpus, group_balance_mask(sg)); // 复制调度组的均衡CPU掩码
+
+    /* 遍历候选CPU，从调度组中找到第一个idle的cpu */
+    for_each_cpu_and(cpu, swb_cpus, env->cpus) {
+        if (!idle_cpu(cpu)) // 跳过非空闲CPU
+            continue;
+
+        /*
+         * 核心级均衡的特殊处理（非SMT共享域）：
+         * - 当发现一个忙碌核心中的空闲SMT CPU时：
+         *   a) 先记录第一个空闲SMT CPU（idle_smt）
+         *   b) 跳过该核心的其他SMT CPU检查（通过掩码删除）
+         * - 优先寻找完全空闲的核心
+         */
+        if (!(env->sd->flags & SD_SHARE_CPUCAPACITY) && !is_core_idle(cpu)) {
+            if (idle_smt == -1)
+                idle_smt = cpu; // 记录第一个空闲SMT CPU
+#ifdef CONFIG_SCHED_SMT
+            // 从检查掩码中移除该SMT核心的所有CPU
+            cpumask_andnot(swb_cpus, swb_cpus, cpu_smt_mask(cpu));
+#endif
+            continue;
+        }
+
+        /*
+         * 满足以下条件时立即返回：
+         * - 对于非SMT域或更高层级：当前是域内第一个空闲核心
+         * - 对于SMT域：当前是域内第一个空闲CPU
+         */
+        return cpu == env->dst_cpu;
+    }
+
+    /* 如果存在忙碌核心中的空闲SMT CPU，检查是否为目标CPU */
+    if (idle_smt != -1)
+        return idle_smt == env->dst_cpu;
+
+    /* 默认情况：检查目标CPU是否为调度组的首选均衡CPU */
+    return group_balance_cpu(sg) == env->dst_cpu;
+}
+```
+### 寻找需要迁移任务的源调度组与源队列
+
+sched_balance_find_src_group 函数用于寻找当前调度域中需要迁移的调度组。下面是一张决策表
+
+busiest \ local​|has_spare ​|fully_busy ​|misfit ​|asym ​|imbalanced ​|overloaded​|
+|----|----|----|----|----|----|----|
+|has_spare        |nr_idle   |balanced   |N/A    |N/A  |balanced   |balanced|
+|fully_busy       |nr_idle   |nr_idle    |N/A    |N/A  |balanced   |balanced|
+|misfit_task      |force     |N/A        |N/A    |N/A  |N/A        |N/A|
+|asym_packing     |force     |force      |N/A    |N/A  |force      |force|
+|imbalanced       |force     |force      |N/A    |N/A  |force      |force|
+|overloaded       |force     |force      |N/A    |N/A  |force      |avg_load|
+
+表格含义：
+
+busiest是指要对比的调度组，local是当前调度组（本cpu核所在的），表中的第一行/列代表调度组的类型；
+
+ * N/A :      不适用，因为在更新统计信息时已经过滤掉。
+ * balanced : 系统在这两个组之间是平衡的。
+ * force :    计算不平衡，因为可能需要进行负载迁移。
+ * avg_load : 仅当不平衡显著时才进行处理。
+ * nr_idle :  dst_cpu 不繁忙，并且组之间的空闲 CPU 数量差异较大。
+
+在这里需要比较 local group 跟 busiest group 之间的负载差异，再两者之间尽量做均衡。只有 local group 比 busiest group 更空闲时才会进行迁移。因为只能是 local group 拉 busiest group，如果 local group 忙于 busiest group，那么即使不平衡也只能当作平衡对待。
+
+在这里使用 group_type 来表示调度组现在忙的状态：
 
 ```c
 enum group_type {
@@ -487,7 +572,7 @@ enum group_type {
 };
 ```
 
-​|​枚举值​​	​|​优先级​​	​|​状态描述​​	​|​触发条件​​	|​​典型场景​​	​|​负载均衡动作​​|
+​|枚举值​​ |​优先级​​	​|​状态描述​​	​|​触发条件​​	|​​典型场景​​	​|​负载均衡动作​​|
 |----|----|----|----|----|----|----|
 |group_has_spare|	0（最低）	|组内有空闲算力可运行更多任务|	组内空闲CPU占比较高（如idle_cpus > group_weight/2）	|4核CPU组中有2个空闲核	|接收其他组迁移来的任务|
 |group_fully_busy|1	|组内CPU全忙但无资源竞争|	所有CPU的nr_running > 0且无等待任务	|每个CPU运行1个非CPU密集型任务|	通常不触发迁移|
@@ -497,12 +582,158 @@ enum group_type {
 |group_imbalanced|	5	|因任务亲和性限制导致负载不均|	任务被cpuset或sched_setaffinity限制到部分CPU	|数据库进程绑定到前4核导致后4核闲置|	尝试突破亲和性限制做强制均衡|
 |group_overloaded|	6（最高）	|CPU过载无法满足任务需求|	运行队列中有多个任务等待（sum_nr_running > 1）	|单核上运行10个计算密集型线程|	分散任务到其他组|
 
+这些值由 update_sg_lb_stats 计算得出，通过比较大小来确定busy程度，越大越忙。在update_sd_pick_busiest中会用到这一点来选出最忙的组。
 
-#### 寻找需要迁移任务的源调度队列
+在 update_sd_lb_stats 函数中会遍历当前调度域中的所有调度组，并调用 update_sg_lb_stats 函数来计算 busy 的程度
+
+```c
+//update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sds)
+
+    /* 遍历调度域中的所有调度组 */
+    do {
+        struct sg_lb_stats *sgs = &tmp_sgs;    // 默认使用临时统计存储
+        int local_group;                       // 标记当前组是否为本地组
+
+        /* 检查当前CPU是否属于该调度组 */
+        local_group = cpumask_test_cpu(env->dst_cpu, sched_group_span(sg));
+        if (local_group) {
+            sds->local = sg;                   // 记录本地组指针
+            sgs = local;                       // 直接使用本地组统计存储
+
+            /* 更新本地组容量（新空闲状态或达到更新周期时） */
+            if (env->idle != CPU_NEWLY_IDLE ||
+                time_after_eq(jiffies, sg->sgc->next_update))
+                update_group_capacity(env->sd, env->dst_cpu);
+        }
+
+        /* 更新当前调度组的负载统计 */
+        update_sg_lb_stats(env, sds, sg, sgs, &sg_overloaded, &sg_overutilized);
+
+        /* 如果是非本地组且比当前最忙组更繁忙，更新最忙组信息 */
+        if (!local_group && update_sd_pick_busiest(env, sds, sg, sgs)) {
+            sds->busiest = sg;
+            sds->busiest_stat = *sgs;          // 复制统计信息
+        }
+
+        /* 累加全局统计信息 */
+        sds->total_load += sgs->group_load;    // 总负载
+        sds->total_capacity += sgs->group_capacity; // 总容量
+        sum_util += sgs->group_util;           // 总利用率
+
+        sg = sg->next;                         // 移动到下一个调度组
+    } while (sg != env->sd->groups);           // 直到遍历完所有组
+
+```
+
+```c
+/**
+ * update_sg_lb_stats - 更新调度组的负载均衡统计信息
+ * @env: 负载均衡环境变量
+ * @sds: 包含本地组统计信息的负载均衡数据
+ * @group: 需要更新统计信息的调度组
+ * @sgs: 用于存储该调度组统计信息的变量
+ * @sg_overloaded: 标记调度组是否过载
+ * @sg_overutilized: 标记调度组是否过度利用
+ *
+ * 此函数遍历调度组中的所有CPU，收集负载、利用率、运行任务数量等关键指标，
+ * 并根据调度组的状态更新相关标志，为后续的负载均衡决策提供数据支持。
+ */
+static inline void update_sg_lb_stats(struct lb_env *env,
+					  struct sd_lb_stats *sds,
+					  struct sched_group *group,
+					  struct sg_lb_stats *sgs,
+					  bool *sg_overloaded,
+					  bool *sg_overutilized)
+{
+	int i, nr_running, local_group, sd_flags = env->sd->flags;
+	bool balancing_at_rd = !env->sd->parent; // 是否在根域进行负载均衡
+
+	memset(sgs, 0, sizeof(*sgs)); // 初始化调度组统计信息
+
+	local_group = group == sds->local; // 判断是否为本地组
+
+	// 遍历调度组中的所有CPU
+	for_each_cpu_and(i, sched_group_span(group), env->cpus) {
+		struct rq *rq = cpu_rq(i); // 获取运行队列
+		unsigned long load = cpu_load(rq); // 获取CFS调度组的负载
+
+		sgs->group_load += load; // 累计调度组的总负载
+		sgs->group_util += cpu_util_cfs(i); // 累计调度组的总利用率
+		sgs->group_runnable += cpu_runnable(rq); // 累计调度组的总可运行时间
+		sgs->sum_h_nr_running += rq->cfs.h_nr_runnable; // 累计CFS任务数量
+
+		nr_running = rq->nr_running; // 获取运行队列中的任务数量
+		sgs->sum_nr_running += nr_running; // 累计调度组的总任务数量
+
+		// 检查CPU是否过度利用
+		if (cpu_overutilized(i))
+			*sg_overutilized = 1;
+
+		// 如果运行队列中没有任务且CPU空闲，则增加空闲CPU计数
+		if (!nr_running && idle_cpu(i)) {
+			sgs->idle_cpus++;
+			// 空闲CPU不可能有不匹配任务
+			continue;
+		}
+
+		// 仅在根域更新过载指示器
+		if (balancing_at_rd && nr_running > 1)
+			*sg_overloaded = 1;
+
+#ifdef CONFIG_NUMA_BALANCING
+		// 如果启用了NUMA负载均衡，更新NUMA相关统计信息
+		if (sd_flags & SD_NUMA) {
+			sgs->nr_numa_running += rq->nr_numa_running;
+			sgs->nr_preferred_running += rq->nr_preferred_running;
+		}
+#endif
+		// 如果是本地组，跳过以下检查
+		if (local_group)
+			continue;
+
+		// 检查是否存在不匹配任务
+		if (sd_flags & SD_ASYM_CPUCAPACITY) {
+			if (sgs->group_misfit_task_load < rq->misfit_task_load) {
+				sgs->group_misfit_task_load = rq->misfit_task_load;
+				*sg_overloaded = 1;
+			}
+		} else if (env->idle && sched_reduced_capacity(rq, env->sd)) {
+			// 检查是否有任务运行在容量受限的CPU上
+			if (sgs->group_misfit_task_load < load)
+				sgs->group_misfit_task_load = load;
+		}
+	}
+
+	sgs->group_capacity = group->sgc->capacity; // 更新调度组的总容量
+
+	sgs->group_weight = group->group_weight; // 更新调度组的权重
+
+	// 检查目标CPU是否空闲且优于当前组
+	if (!local_group && env->idle && sgs->sum_h_nr_running &&
+		sched_group_asym(env, sgs, group))
+		sgs->group_asym_packing = 1;
+
+	// 检查是否需要平衡加载的SMT组
+	if (!local_group && smt_balance(env, sgs, group))
+		sgs->group_smt_balance = 1;
+
+	sgs->group_type = group_classify(env->sd->imbalance_pct, group, sgs); // 分类调度组类型
+
+	// 仅在调度组过载时计算平均负载
+	if (sgs->group_type == group_overloaded)
+		sgs->avg_load = (sgs->group_load * SCHED_CAPACITY_SCALE) /
+				sgs->group_capacity;
+}
+```
 
 #### 进行任务迁移
 
+在任务迁移的过程中
+
 ```c
+  if (busiest->nr_running > 1) {
+	
+		env.loop_max  = min(sysctl_sched_nr_migrate, busiest->nr_running);//设置单次迭代最多迁移的任务数
 more_balance:
 		rq_lock_irqsave(busiest, &rf);
 		update_rq_clock(busiest);
@@ -511,7 +742,7 @@ more_balance:
 		 * cur_ld_moved - 当前迭代中迁移的负载
 		 * ld_moved     - 跨迭代累计迁移的负载
 		 */
-		cur_ld_moved = detach_tasks(&env);
+		cur_ld_moved = detach_tasks(&env);// 从busiest队列分离任务
 
 		/*
 		 * 已从 busiest_rq 分离一些任务。每个任务都被标记为 "TASK_ON_RQ_MIGRATING"，
@@ -521,7 +752,7 @@ more_balance:
 		rq_unlock(busiest, &rf);
 
 		if (cur_ld_moved) {
-			attach_tasks(&env);
+			attach_tasks(&env);// 附加到目标队列
 			ld_moved += cur_ld_moved;
 		}
 
@@ -542,7 +773,7 @@ more_balance:
 			/* 防止通过 env 的 CPUs 重新选择 dst_cpu */
 			__cpumask_clear_cpu(env.dst_cpu, env.cpus);
 
-			env.dst_rq	 = cpu_rq(env.new_dst_cpu);
+			env.dst_rq	 = cpu_rq(env.new_dst_cpu);//切换到同组其他cpu
 			env.dst_cpu	 = env.new_dst_cpu;
 			env.flags	&= ~LBF_DST_PINNED;
 			env.loop	 = 0;
@@ -595,7 +826,7 @@ more_balance:
 			env.migration_type != migrate_misfit)
 			sd->nr_balance_failed++;
 
-		if (need_active_balance(&env)) {
+		if (need_active_balance(&env)) {// 
 			unsigned long flags;
 
 			raw_spin_rq_lock_irqsave(busiest, flags);
@@ -605,7 +836,7 @@ more_balance:
 			 * 则不要触发 active_load_balance_cpu_stop：
 			 */
 			if (!cpumask_test_cpu(this_cpu, busiest->curr->cpus_ptr)) {
-				raw_spin_rq_unlock_irqrestore(busiest, flags);
+				raw_spin_rq_unlock_irqrestore(busiest, flags);// 启动 migrate_task_to
 				goto out_one_pinned;
 			}
 
@@ -643,13 +874,36 @@ more_balance:
 
 这里在迁移时有四种状态：
 
-* LBF_NEED_BREAK是用来做中场休息的，其实还没有迁移完，所以这时候只是释放rq锁，然后再回去重新来迁移进程。
+* LBF_NEED_BREAK 是用来做中场休息的，其实还没有迁移完，所以这时候只是释放rq锁，然后再回去重新来迁移进程。
 
-* LBF_DST_PINNED是指要被迁移的task因为affinity的原有没法迁移，将env.dst_cpu换成env.new_dst_cpu再去试试。
+  设置任务迁移的标志：
 
-* LBF_SOME_PINNED是指因为affinity的原有无法迁移进程，让父调度域去解决。
+  ```c
+		/* 每迁移 nr_migrate 个任务后休息一下 */
+		if (env->loop > env->loop_break) {
+			env->loop_break += SCHED_NR_MIGRATE_BREAK; // 更新下一个休息点
+			env->flags |= LBF_NEED_BREAK; // 设置需要休息的标志
+			break; // 退出循环，进行休息
+		}
+  ```
+  这里的目的是
+* LBF_DST_PINNED 是指要被迁移的task因为affinity的原有没法迁移，将env.dst_cpu换成env.new_dst_cpu再去试试。
 
-* LBF_ALL_PINNED说明所有task都pin住了，没法迁移，清除在排除掉busiest group的cpu尝试重新选择busiest group从头再来。
+* LBF_SOME_PINNED 是指因为affinity的原有无法迁移进程，让父调度域去解决。
+
+* LBF_ALL_PINNED 说明所有task都pin住了，没法迁移，清除在排除掉busiest group的cpu尝试重新选择busiest group从头再来。
+
+### 错误处理
+
+​​2. 为什么需要主动均衡？​​
+​​(1) 常规均衡的局限性​​
+​​任务执行导致无法迁移​​：
+常规均衡（如 detach_tasks）只能迁移 ​​就绪态任务​​（在运行队列中等待的任务）。如果源CPU的任务 ​​正在执行​​（busiest->curr），常规均衡无法直接迁移它。
+例如：一个CPU密集型任务长时间占用源CPU，导致调度器没有机会将其移出。
+​​锁竞争或延迟问题​​：
+常规均衡可能在分离任务时因锁冲突失败（如 rq->lock 竞争）。
+​​(2) 目标CPU闲置的浪费​​
+如果目标CPU持续空闲，而源CPU因任务卡住无法释放负载，会导致 ​​系统吞吐量下降​​ 和 ​​能效降低​​。
 
 ## 为task选择cpu
 
