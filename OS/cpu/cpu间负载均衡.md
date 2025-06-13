@@ -204,7 +204,7 @@ static void sched_balance_update_blocked_averages(int cpu)
 }
 ```
 
-在 sched_balance_domains 会遍历当前 CPU 所有的调度域，
+在 sched_balance_domains 会遍历当前 CPU 所有的调度域。
 
 ```c
 /**
@@ -461,7 +461,7 @@ out:
 
 ### 1.判断当前 CPU 是否需要进行负载均衡 
 
-由函数 should_we_balance 检查是否需要进行负载均衡，这里需要检查以下几个场景
+由函数 should_we_balance 检查是否需要进行负载均衡，这里需要检查以下几个场景：
 
 |场景 | 触发条件 | 典型触发路径 | 优先级 |
 |----|----|----|----|
@@ -533,7 +533,7 @@ static int should_we_balance(struct lb_env *env)
     return group_balance_cpu(sg) == env->dst_cpu;
 }
 ```
-### 寻找需要迁移任务的源调度组与源队列
+### 2.寻找需要迁移任务的源调度组与源队列
 
 sched_balance_find_src_group 函数用于寻找当前调度域中需要迁移的调度组。下面是一张决策表
 
@@ -548,7 +548,7 @@ busiest \ local​|has_spare ​|fully_busy ​|misfit ​|asym ​|imbalanced �
 
 表格含义：
 
-busiest是指要对比的调度组，local是当前调度组（本cpu核所在的），表中的第一行/列代表调度组的类型；
+busiest是指要对比的调度组，local是当前调度组（本cpu核所在的），表中的第一行/列代表调度组的类型
 
  * N/A :      不适用，因为在更新统计信息时已经过滤掉。
  * balanced : 系统在这两个组之间是平衡的。
@@ -584,7 +584,7 @@ enum group_type {
 
 这些值由 update_sg_lb_stats 计算得出，通过比较大小来确定busy程度，越大越忙。在update_sd_pick_busiest中会用到这一点来选出最忙的组。
 
-在 update_sd_lb_stats 函数中会遍历当前调度域中的所有调度组，并调用 update_sg_lb_stats 函数来计算 busy 的程度
+在 update_sd_lb_stats 函数中会遍历当前调度域中的所有调度组，并调用 update_sg_lb_stats 函数来计算 busy 的程度。
 
 ```c
 //update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sds)
@@ -624,6 +624,16 @@ enum group_type {
     } while (sg != env->sd->groups);           // 直到遍历完所有组
 
 ```
+
+在 update_sg_lb_stats 函数中主要计算了以下值：
+
+|统计项	|计算方式	|作用|
+|---|---|---|
+|group_load	|累加组内所有 CPU 的 cpu_load(rq)（CFS 运行队列负载）|	反映调度组的​​总负载压力|​​
+|group_util	|累加组内所有 CPU 的 cpu_util_cfs(i)（CFS 利用率）|	衡量 CPU 资源实际使用率|
+|group_runnable	|累加组内所有 CPU 的 cpu_runnable(rq)（可运行时间）|	表示任务等待执行的累积时间|
+|sum_nr_running	|累加组内所有 CPU 的 rq->nr_running（运行队列中的任务数）|	统计组内​​总任务数量​|​
+|sum_h_nr_running	|累加组内所有 CPU 的 rq->cfs.h_nr_runnable（CFS 可运行任务数）|	专用于 CFS 调度类的任务计数|
 
 ```c
 /**
@@ -726,54 +736,93 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 }
 ```
 
-#### 进行任务迁移
+### 进行任务迁移
 
-在任务迁移的过程中
+在任务迁移的过程中有如下过程：
+
+1. 从busiest队列分离任务 detach_tasks
+2. 将分离的任务附加到目标队列 attach_tasks
+3. 检查 LBF_NEED_BREAK 等标志并对此做出处理
+4. 错误处理
+
+
+这里在迁移时有四种状态：
+
+**LBF_NEED_BREAK**
+
+表示中场休息的，其实还没有迁移完，所以这时候只是释放rq锁，然后再回去重新来迁移进程。
+
+设置任务迁移的标志：
 
 ```c
-  if (busiest->nr_running > 1) {
-	
-		env.loop_max  = min(sysctl_sched_nr_migrate, busiest->nr_running);//设置单次迭代最多迁移的任务数
-more_balance:
-		rq_lock_irqsave(busiest, &rf);
-		update_rq_clock(busiest);
-
-		/*
-		 * cur_ld_moved - 当前迭代中迁移的负载
-		 * ld_moved     - 跨迭代累计迁移的负载
-		 */
-		cur_ld_moved = detach_tasks(&env);// 从busiest队列分离任务
-
-		/*
-		 * 已从 busiest_rq 分离一些任务。每个任务都被标记为 "TASK_ON_RQ_MIGRATING"，
-		 * 因此可以安全地解锁 busiest->lock，并确保没有人可以并行操作这些任务。
-		 * 详情请参阅 task_rq_lock() 系列函数。
-		 */
-		rq_unlock(busiest, &rf);
-
-		if (cur_ld_moved) {
-			attach_tasks(&env);// 附加到目标队列
-			ld_moved += cur_ld_moved;
+  // detach_tasks
+		/* 每迁移 nr_migrate 个任务后休息一下 */
+		if (env->loop > env->loop_break) {
+			env->loop_break += SCHED_NR_MIGRATE_BREAK; // 更新下一个休息点
+			env->flags |= LBF_NEED_BREAK; // 设置需要休息的标志
+			break; // 退出循环，进行休息
 		}
+```
 
-		local_irq_restore(rf.flags);
+为什么需要这样做？
 
+1. 避免长时间持有资源锁：迁移进程通常涉及对资源（如 rq 锁，即运行队列锁）的操作。如果迁移过程耗时较长，长时间持有锁可能会导致其他任务无法访问这些资源，从而影响系统的整体性能和响应能力。通过 LBF_NEED_BREAK 释放锁，可以让其他任务有机会获取资源，避免锁竞争导致的性能瓶颈。
+
+2. 提高系统的实时性：在多任务系统中，实时性是一个重要的指标。长时间的迁移操作可能会阻塞其他任务的调度，影响系统的实时性。通过引入中场休息机制，系统可以在迁移过程中暂停，处理其他更紧急的任务，然后再继续迁移。这种设计可以提高系统的响应速度和实时性。
+
+3. 动态调整迁移策略：迁移进程的条件可能会随着系统状态的变化而改变。例如，负载分布、任务优先级或资源使用情况可能在迁移过程中发生变化。通过中场休息重新评估迁移条件，可以确保迁移策略始终符合当前系统的最佳状态，避免不必要的迁移或错误的决策。
+
+对于 LBF_NEED_BREAK 这个参数的处理只需要跳转回函数开始任务迁移的开头处就可以了。
+
+```c
+// sched_balance_rq
 		if (env.flags & LBF_NEED_BREAK) {
 			env.flags &= ~LBF_NEED_BREAK;
 			goto more_balance;
 		}
+```
+
+**LBF_DST_PINNED**
+
+表示目标 CPU 不兼容​，当尝试将任务从源 CPU（busiest）迁移到​​原定目标 CPU（env.dst_cpu）​​时，发现该任务的 CPU 亲和性（p->cpus_ptr）​​不包含 env.dst_cpu​​，但存在同组内其他合法 CPU。此时应该重新筛选目标 CPU。
+
+```c
+// can_migrate_task
 
 		/*
-		 * 重新访问无法迁移到 dst_cpu 的 src_cpu 上的任务，
-		 * 并将它们迁移到调度组中的其他 dst_cpu 上。
-		 * 我们对同一 src_cpu 的迭代次数上限取决于调度组中的 CPU 数量。
+		 * 记录该任务是否可以迁移到调度组中的其他CPU。
+		 * 如果无法通过迁移src_cpu上的其他任务来满足负载均衡目标，
+		 * 我们可能需要重新考虑迁移该任务。
+		 *
+		 * 避免在以下情况下计算new_dst_cpu：
+		 * - NEWLY_IDLE状态
+		 * - 当前迭代中已经计算过一个目标CPU
+		 * - 处于主动负载均衡状态
 		 */
+		if (env->idle == CPU_NEWLY_IDLE ||
+			env->flags & (LBF_DST_PINNED | LBF_ACTIVE_LB))
+			return 0;
+    // 遍历 CPU 找到新的目标 CPU
+		for_each_cpu_and(cpu, env->dst_grpmask, env->cpus) {
+			if (cpumask_test_cpu(cpu, p->cpus_ptr)) {//cpumask_test_cpu 检查目标 CPU 是否在任务的亲和性掩码
+				env->flags |= LBF_DST_PINNED;
+				env->new_dst_cpu = cpu;
+				break;
+			}
+		}
+
+```
+
+在 can_migrate_task 中已经找到新的目标 cpu 这里只需要重新设置一下各个参数就行了。
+
+```c
+// sched_balance_rq
 		if ((env.flags & LBF_DST_PINNED) && env.imbalance > 0) {
 
 			/* 防止通过 env 的 CPUs 重新选择 dst_cpu */
 			__cpumask_clear_cpu(env.dst_cpu, env.cpus);
 
-			env.dst_rq	 = cpu_rq(env.new_dst_cpu);//切换到同组其他cpu
+			env.dst_rq	 = cpu_rq(env.new_dst_cpu);
 			env.dst_cpu	 = env.new_dst_cpu;
 			env.flags	&= ~LBF_DST_PINNED;
 			env.loop	 = 0;
@@ -784,7 +833,23 @@ more_balance:
 			 */
 			goto more_balance;
 		}
+```
 
+**LBF_SOME_PINNED**
+
+在源 CPU（busiest）上存在​​至少一个任务因亲和性无法迁移到任何目标 CPU​​，但其他任务可以迁移。该情况要让父调度域去解决。
+
+这里同样要经过 cpumask_test_cpu 的检查。
+
+```c
+// can_migrate_task
+if (!cpumask_test_cpu(env->dst_cpu, p->cpus_ptr))
+```
+
+对于 LBF_SOME_PINNED 标志会标记 group_imbalance 交由父级的调度域处理。
+
+```c
+// sched_balance_rq
 		/*
 		 * 由于任务的亲和性，我们未能达到平衡。
 		 */
@@ -794,14 +859,25 @@ more_balance:
 			if ((env.flags & LBF_SOME_PINNED) && env.imbalance > 0)
 				*group_imbalance = 1;
 		}
+```
 
-		/* 此运行队列上的所有任务都因 CPU 亲和性而被固定 */
+**LBF_ALL_PINNED**
+
+在源 CPU（busiest）上的全部任务都设置了亲和性无法被迁移。
+
+在开始进行任务迁移时会先进行置位，之后在任务迁移的过程中会调用 can_migrate_task 函数，如果能找到大于等于一个可以迁移的任务，就移除这个标志位。
+
+```c
+//can_migrate_task
+/* Record that we found at least one task that could run on dst_cpu */
+	env->flags &= ~LBF_ALL_PINNED;
+```
+
+```c
 		if (unlikely(env.flags & LBF_ALL_PINNED)) {
 			__cpumask_clear_cpu(cpu_of(busiest), cpus);
 			/*
-			 * 仅当当前调度域级别仍有活跃 CPU 可作为最繁忙的 CPU 来拉取负载，
-			 * 且这些 CPU 不包含在接收迁移负载的目标组中时，
-			 * 才继续负载均衡。
+       * 检查当前调度组内是否还有活跃的 CPU 可以作为目标cpu拉取任务，如果可用则返回开头继续，否则结束
 			 */
 			if (!cpumask_subset(cpus, env.dst_grpmask)) {
 				env.loop = 0;
@@ -810,92 +886,20 @@ more_balance:
 			}
 			goto out_all_pinned;
 		}
-	}
 
-	if (!ld_moved) {
-		schedstat_inc(sd->lb_failed[idle]);
-		/*
-		 * 仅在周期性负载均衡时增加失败计数器。
-		 * 我们不希望频繁的新空闲负载均衡污染失败计数器，
-		 * 导致过多的 cache_hot 迁移和主动负载均衡。
-		 *
-		 * 同样，migration_misfit 不涉及负载/利用率迁移，
-		 * 不应污染 nr_balance_failed。
-		 */
-		if (idle != CPU_NEWLY_IDLE &&
-			env.migration_type != migrate_misfit)
-			sd->nr_balance_failed++;
+  /*
+	 * 我们达到平衡，因为所有任务在此级别都被固定，
+	 * 因此无法迁移它们。让不平衡标志保持设置，
+	 * 以便父级可以尝试迁移它们。
+	 */
+	schedstat_inc(sd->lb_balanced[idle]);
 
-		if (need_active_balance(&env)) {// 
-			unsigned long flags;
-
-			raw_spin_rq_lock_irqsave(busiest, flags);
-
-			/*
-			 * 如果 busiest CPU 上的当前任务无法迁移到 this_cpu，
-			 * 则不要触发 active_load_balance_cpu_stop：
-			 */
-			if (!cpumask_test_cpu(this_cpu, busiest->curr->cpus_ptr)) {
-				raw_spin_rq_unlock_irqrestore(busiest, flags);// 启动 migrate_task_to
-				goto out_one_pinned;
-			}
-
-			/* 记录至少找到一个任务可以在 this_cpu 上运行 */
-			env.flags &= ~LBF_ALL_PINNED;
-
-			/*
-			 * ->active_balance 同步访问 ->active_balance_work。
-			 * 一旦设置，仅在主动负载均衡完成后清除。
-			 */
-			if (!busiest->active_balance) {
-				busiest->active_balance = 1;
-				busiest->push_cpu = this_cpu;
-				active_balance = 1;
-			}
-
-			preempt_disable();
-			raw_spin_rq_unlock_irqrestore(busiest, flags);
-			if (active_balance) {
-				stop_one_cpu_nowait(cpu_of(busiest),
-					active_load_balance_cpu_stop, busiest,
-					&busiest->active_balance_work);
-			}
-			preempt_enable();
-		}
-	} else {
-		sd->nr_balance_failed = 0;
-	}
-
-	if (likely(!active_balance) || need_active_balance(&env)) {
-		/* 我们处于不平衡状态，因此重置负载均衡间隔 */
-		sd->balance_interval = sd->min_interval;
-	}
+	sd->nr_balance_failed = 0;
 ```
-
-这里在迁移时有四种状态：
-
-* LBF_NEED_BREAK 是用来做中场休息的，其实还没有迁移完，所以这时候只是释放rq锁，然后再回去重新来迁移进程。
-
-  设置任务迁移的标志：
-
-  ```c
-		/* 每迁移 nr_migrate 个任务后休息一下 */
-		if (env->loop > env->loop_break) {
-			env->loop_break += SCHED_NR_MIGRATE_BREAK; // 更新下一个休息点
-			env->flags |= LBF_NEED_BREAK; // 设置需要休息的标志
-			break; // 退出循环，进行休息
-		}
-  ```
-  这里的目的是
-* LBF_DST_PINNED 是指要被迁移的task因为affinity的原有没法迁移，将env.dst_cpu换成env.new_dst_cpu再去试试。
-
-* LBF_SOME_PINNED 是指因为affinity的原有无法迁移进程，让父调度域去解决。
-
-* LBF_ALL_PINNED 说明所有task都pin住了，没法迁移，清除在排除掉busiest group的cpu尝试重新选择busiest group从头再来。
 
 ### 错误处理
 
-​​2. 为什么需要主动均衡？​​
+为什么需要主动均衡？​​
 ​​(1) 常规均衡的局限性​​
 ​​任务执行导致无法迁移​​：
 常规均衡（如 detach_tasks）只能迁移 ​​就绪态任务​​（在运行队列中等待的任务）。如果源CPU的任务 ​​正在执行​​（busiest->curr），常规均衡无法直接迁移它。
@@ -904,6 +908,16 @@ more_balance:
 常规均衡可能在分离任务时因锁冲突失败（如 rq->lock 竞争）。
 ​​(2) 目标CPU闲置的浪费​​
 如果目标CPU持续空闲，而源CPU因任务卡住无法释放负载，会导致 ​​系统吞吐量下降​​ 和 ​​能效降低​​。
+
+主动均衡如何解决问题？​​
+通过 ​​强制迁移源CPU的当前任务​​：
+
+​​异步抢占机制​​：
+调用 stop_one_cpu_nowait() 向源CPU发送 ​​处理器间中断（IPI）​​，强制其执行 active_load_balance_cpu_stop。
+该函数会抢占当前任务，将其从源CPU迁移到目标CPU（通过 migrate_task_to）。
+​​绕过常规限制​​：
+主动均衡直接操作 ​​运行中任务​​，而常规均衡只能操作就绪队列中的任务。
+类似于“强制驱逐”繁忙CPU的任务。
 
 ## 为task选择cpu
 
