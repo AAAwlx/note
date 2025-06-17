@@ -1,6 +1,10 @@
 
-​​EAS (Energy Aware Scheduling)​​ 是 Linux 内核的一种调度策略，旨在 ​​优化 CPU 能效​​，在保证性能的同时 ​​降低功耗​​。它主要应用于 ​​ARM big.LITTLE 架构​​ 和 ​​异构多核处理器​​（如手机 SoC），通过智能调度任务到合适的 CPU 核心，实现 ​​性能与功耗的最佳平衡​​。
+## EAS算法​​
+EAS (Energy Aware Scheduling)​​ 是 Linux 内核的一种调度策略，旨在 ​​优化 CPU 能效​​，在保证性能的同时 ​​降低功耗​​。它主要应用于 ​​ARM big.LITTLE 架构​​ 和 ​​异构多核处理器​​（如手机 SoC），通过智能调度任务到合适的 CPU 核心，实现 ​​性能与功耗的最佳平衡​​。
 
+## 为task选择cpu
+
+有三种情况需要为task选择cpu：刚创建的进程（fork），刚exec的进程（exec），刚被唤醒的进程（wakeup）他们都会调用select_task_rq，对于cfs，就是select_task_rq_fair。
 
 是的，CFS 选择进程（线程）和选择 CPU 的时机是完全分离的，两者发生在任务生命周期的不同阶段，且由不同的机制负责。以下是关键区别和协作流程：
 

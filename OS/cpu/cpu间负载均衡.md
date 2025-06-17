@@ -138,6 +138,146 @@ static void kick_ilb(unsigned int flags)
 
 在 nohz_csd_func 中会调用 __raise_softirq_irqoff 函数来触发 SCHED_SOFTIRQ 中断。
 
+### newidle balance
+
+在 cpu 需要进行任务切换时，会选择下一个需要被调度上 CPU 的任务。这里的任务后首先从当前 CPU 的 rq 中选择，如果当前 CPU 的可运行任务队列中已经没有任务可以运行。那么就会触发负载均衡从其他繁忙的 CPU 上来取任务来执行。
+
+>pick_next_task_fair -> sched_balance_newidle -> sched_balance_rq
+
+如果拉取到任务，pick_next_task_fair 会重新 pick task，将拉取到的task调度上去。
+
+```c
+static int sched_balance_newidle(struct rq *this_rq, struct rq_flags *rf)
+{
+	unsigned long next_balance = jiffies + HZ; // 下一次负载均衡的时间
+	int this_cpu = this_rq->cpu; // 当前 CPU
+	int continue_balancing = 1; // 是否继续负载均衡
+	u64 t0, t1, curr_cost = 0; // 记录负载均衡的时间开销
+	struct sched_domain *sd; // 调度域
+	int pulled_task = 0; // 是否成功拉取任务
+
+	// 更新错配任务状态
+	update_misfit_status(NULL, this_rq);
+
+	/*
+	 * 如果有任务等待运行，则无需搜索任务。
+	 * 返回 0；任务将在切换到空闲状态时入队。
+	 */
+	if (this_rq->ttwu_pending)
+		return 0;
+
+	/*
+	 * 必须在调用 sched_balance_rq() 之前设置 idle_stamp，
+	 * 以便将此时段计为空闲时间。
+	 */
+	this_rq->idle_stamp = rq_clock(this_rq);
+
+	/*
+	 * 不要将任务拉向非活动 CPU...
+	 */
+	if (!cpu_active(this_cpu))
+		return 0;
+
+	/*
+	 * 当前任务在 CPU 上运行，避免其被选中进行负载均衡。
+	 * 同时中断/抢占仍然被禁用，避免进一步的调度器活动。
+	 */
+	rq_unpin_lock(this_rq, rf);
+
+	rcu_read_lock();
+	sd = rcu_dereference_check_sched_domain(this_rq->sd);
+
+	/*
+	 * 如果调度域未过载，或者当前 CPU 的平均空闲时间小于
+	 * 调度域的最大负载均衡时间开销，则跳过负载均衡。
+	 */
+	if (!get_rd_overloaded(this_rq->rd) ||
+		(sd && this_rq->avg_idle < sd->max_newidle_lb_cost)) {
+
+		if (sd)
+			update_next_balance(sd, &next_balance);
+		rcu_read_unlock();
+
+		goto out;
+	}
+	rcu_read_unlock();
+
+	// 释放运行队列锁
+	raw_spin_rq_unlock(this_rq);
+
+	t0 = sched_clock_cpu(this_cpu); // 记录开始时间
+	sched_balance_update_blocked_averages(this_cpu); // 更新阻塞任务的负载均衡统计
+
+	rcu_read_lock();
+	for_each_domain(this_cpu, sd) {
+		u64 domain_cost;
+
+		// 更新调度域的下一次负载均衡时间
+		update_next_balance(sd, &next_balance);
+
+		// 如果当前 CPU 的平均空闲时间不足以进行负载均衡，则停止
+		if (this_rq->avg_idle < curr_cost + sd->max_newidle_lb_cost)
+			break;
+
+		// 如果调度域支持新空闲负载均衡，则尝试拉取任务
+		if (sd->flags & SD_BALANCE_NEWIDLE) {
+
+			pulled_task = sched_balance_rq(this_cpu, this_rq,
+						   sd, CPU_NEWLY_IDLE,
+						   &continue_balancing);
+
+			t1 = sched_clock_cpu(this_cpu); // 记录结束时间
+			domain_cost = t1 - t0; // 计算调度域的负载均衡时间开销
+			update_newidle_cost(sd, domain_cost); // 更新调度域的负载均衡时间开销
+
+			curr_cost += domain_cost; // 累加总开销
+			t0 = t1; // 更新开始时间
+		}
+
+		/*
+		 * 如果成功拉取任务，或者不需要继续负载均衡，则停止搜索任务。
+		 */
+		if (pulled_task || !continue_balancing)
+			break;
+	}
+	rcu_read_unlock();
+
+	// 重新获取运行队列锁
+	raw_spin_rq_lock(this_rq);
+
+	// 如果负载均衡时间开销超过当前运行队列的最大空闲负载均衡时间开销，则更新
+	if (curr_cost > this_rq->max_idle_balance_cost)
+		this_rq->max_idle_balance_cost = curr_cost;
+
+	/*
+	 * 在浏览调度域期间，我们释放了运行队列锁，可能有任务在此期间入队。
+	 * 如果我们不再处于空闲状态，则假装我们拉取了一个任务。
+	 */
+	if (this_rq->cfs.h_nr_queued && !pulled_task)
+		pulled_task = 1;
+
+	/* 是否存在高优先级任务 */
+	if (this_rq->nr_running != this_rq->cfs.h_nr_queued)
+		pulled_task = -1;
+
+out:
+	/* 将下一次负载均衡时间向前移动 */
+	if (time_after(this_rq->next_balance, next_balance))
+		this_rq->next_balance = next_balance;
+
+	// 如果成功拉取任务，则清除 idle_stamp，否则更新空闲负载均衡状态
+	if (pulled_task)
+		this_rq->idle_stamp = 0;
+	else
+		nohz_newidle_balance(this_rq);
+
+	// 重新固定运行队列锁
+	rq_repin_lock(this_rq, rf);
+
+	return pulled_task;
+}
+```
+
 ### 处理 SCHED_SOFTIRQ 中断
 
 SCHED_SOFTIRQ 软中断的中断处理函数是 sched_balance_softirq 。
@@ -308,146 +448,6 @@ out:
      */
     if (likely(update_next_balance))
         rq->next_balance = next_balance;
-}
-```
-
-### newidle balance
-
-在 cpu 需要进行任务切换时，会选择下一个需要被调度上 CPU 的任务。这里的任务后首先从当前 CPU 的 rq 中选择，如果当前 CPU 的可运行任务队列中已经没有任务可以运行。那么就会触发负载均衡从其他繁忙的 CPU 上来取任务来执行。
-
->pick_next_task_fair -> sched_balance_newidle -> sched_balance_rq
-
-如果拉取到任务，pick_next_task_fair 会重新 pick task，将拉取到的task调度上去。
-
-```c
-static int sched_balance_newidle(struct rq *this_rq, struct rq_flags *rf)
-{
-	unsigned long next_balance = jiffies + HZ; // 下一次负载均衡的时间
-	int this_cpu = this_rq->cpu; // 当前 CPU
-	int continue_balancing = 1; // 是否继续负载均衡
-	u64 t0, t1, curr_cost = 0; // 记录负载均衡的时间开销
-	struct sched_domain *sd; // 调度域
-	int pulled_task = 0; // 是否成功拉取任务
-
-	// 更新错配任务状态
-	update_misfit_status(NULL, this_rq);
-
-	/*
-	 * 如果有任务等待运行，则无需搜索任务。
-	 * 返回 0；任务将在切换到空闲状态时入队。
-	 */
-	if (this_rq->ttwu_pending)
-		return 0;
-
-	/*
-	 * 必须在调用 sched_balance_rq() 之前设置 idle_stamp，
-	 * 以便将此时段计为空闲时间。
-	 */
-	this_rq->idle_stamp = rq_clock(this_rq);
-
-	/*
-	 * 不要将任务拉向非活动 CPU...
-	 */
-	if (!cpu_active(this_cpu))
-		return 0;
-
-	/*
-	 * 当前任务在 CPU 上运行，避免其被选中进行负载均衡。
-	 * 同时中断/抢占仍然被禁用，避免进一步的调度器活动。
-	 */
-	rq_unpin_lock(this_rq, rf);
-
-	rcu_read_lock();
-	sd = rcu_dereference_check_sched_domain(this_rq->sd);
-
-	/*
-	 * 如果调度域未过载，或者当前 CPU 的平均空闲时间小于
-	 * 调度域的最大负载均衡时间开销，则跳过负载均衡。
-	 */
-	if (!get_rd_overloaded(this_rq->rd) ||
-		(sd && this_rq->avg_idle < sd->max_newidle_lb_cost)) {
-
-		if (sd)
-			update_next_balance(sd, &next_balance);
-		rcu_read_unlock();
-
-		goto out;
-	}
-	rcu_read_unlock();
-
-	// 释放运行队列锁
-	raw_spin_rq_unlock(this_rq);
-
-	t0 = sched_clock_cpu(this_cpu); // 记录开始时间
-	sched_balance_update_blocked_averages(this_cpu); // 更新阻塞任务的负载均衡统计
-
-	rcu_read_lock();
-	for_each_domain(this_cpu, sd) {
-		u64 domain_cost;
-
-		// 更新调度域的下一次负载均衡时间
-		update_next_balance(sd, &next_balance);
-
-		// 如果当前 CPU 的平均空闲时间不足以进行负载均衡，则停止
-		if (this_rq->avg_idle < curr_cost + sd->max_newidle_lb_cost)
-			break;
-
-		// 如果调度域支持新空闲负载均衡，则尝试拉取任务
-		if (sd->flags & SD_BALANCE_NEWIDLE) {
-
-			pulled_task = sched_balance_rq(this_cpu, this_rq,
-						   sd, CPU_NEWLY_IDLE,
-						   &continue_balancing);
-
-			t1 = sched_clock_cpu(this_cpu); // 记录结束时间
-			domain_cost = t1 - t0; // 计算调度域的负载均衡时间开销
-			update_newidle_cost(sd, domain_cost); // 更新调度域的负载均衡时间开销
-
-			curr_cost += domain_cost; // 累加总开销
-			t0 = t1; // 更新开始时间
-		}
-
-		/*
-		 * 如果成功拉取任务，或者不需要继续负载均衡，则停止搜索任务。
-		 */
-		if (pulled_task || !continue_balancing)
-			break;
-	}
-	rcu_read_unlock();
-
-	// 重新获取运行队列锁
-	raw_spin_rq_lock(this_rq);
-
-	// 如果负载均衡时间开销超过当前运行队列的最大空闲负载均衡时间开销，则更新
-	if (curr_cost > this_rq->max_idle_balance_cost)
-		this_rq->max_idle_balance_cost = curr_cost;
-
-	/*
-	 * 在浏览调度域期间，我们释放了运行队列锁，可能有任务在此期间入队。
-	 * 如果我们不再处于空闲状态，则假装我们拉取了一个任务。
-	 */
-	if (this_rq->cfs.h_nr_queued && !pulled_task)
-		pulled_task = 1;
-
-	/* 是否存在高优先级任务 */
-	if (this_rq->nr_running != this_rq->cfs.h_nr_queued)
-		pulled_task = -1;
-
-out:
-	/* 将下一次负载均衡时间向前移动 */
-	if (time_after(this_rq->next_balance, next_balance))
-		this_rq->next_balance = next_balance;
-
-	// 如果成功拉取任务，则清除 idle_stamp，否则更新空闲负载均衡状态
-	if (pulled_task)
-		this_rq->idle_stamp = 0;
-	else
-		nohz_newidle_balance(this_rq);
-
-	// 重新固定运行队列锁
-	rq_repin_lock(this_rq, rf);
-
-	return pulled_task;
 }
 ```
 
@@ -736,7 +736,7 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 }
 ```
 
-### 进行任务迁移
+### 3.进行任务迁移
 
 在任务迁移的过程中有如下过程：
 
@@ -897,7 +897,9 @@ if (!cpumask_test_cpu(env->dst_cpu, p->cpus_ptr))
 	sd->nr_balance_failed = 0;
 ```
 
-### 错误处理
+### 4.错误处理
+
+
 
 为什么需要主动均衡？​​
 ​​(1) 常规均衡的局限性​​
@@ -919,6 +921,4 @@ if (!cpumask_test_cpu(env->dst_cpu, p->cpus_ptr))
 主动均衡直接操作 ​​运行中任务​​，而常规均衡只能操作就绪队列中的任务。
 类似于“强制驱逐”繁忙CPU的任务。
 
-## 为task选择cpu
 
-有三种情况需要为task选择cpu：刚创建的进程（fork），刚exec的进程（exec），刚被唤醒的进程（wakeup）他们都会调用select_task_rq，对于cfs，就是select_task_rq_fair。
