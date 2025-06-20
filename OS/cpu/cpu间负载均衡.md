@@ -899,26 +899,107 @@ if (!cpumask_test_cpu(env->dst_cpu, p->cpus_ptr))
 
 ### 4.错误处理
 
+**1. 负载均衡失败统计**
 
+```c
+if (!ld_moved) 
+    schedstat_inc(sd->lb_failed[idle]);
+```
+
+ld_moved：是一个全局或累计变量，用于记录总共迁移成功的任务数量，如果为0表示迁移失败）
+
+在迁移过程中会对迁移成功的任务数量进行累加：
+
+```c
+if (cur_ld_moved) {
+			attach_tasks(&env);
+			ld_moved += cur_ld_moved;
+		}
+```
+
+**2. 统计失败次数**
+
+通过schedstat_inc()递增schedstat调试计数器
+
+区分不同CPU空闲状态（CPU_NEWLY_IDLE或常规空闲）
+条件性失败计数
+
+```c
+if (idle != CPU_NEWLY_IDLE &&
+    env.migration_type != migrate_misfit)
+    sd->nr_balance_failed++;
+```
+排除场景：
+
+新空闲CPU的首次尝试（CPU_NEWLY_IDLE）
+
+非负载/利用率迁移（如migrate_misfit，指任务与CPU算力不匹配）
+
+目的：避免短暂失败污染计数器，导致过度迁移
+
+**3.主动负载均衡触发**
+```c
+if (need_active_balance(&env)) {
+    // 获取目标运行队列锁
+    raw_spin_rq_lock_irqsave(busiest, flags);
+
+    if (!cpumask_test_cpu(this_cpu, busiest->curr->cpus_ptr)) {
+        raw_spin_rq_unlock_irqrestore(busiest, flags);
+        goto out_one_pinned;
+```
+need_active_balance()：检查是否需要强制迁移
+
+条件：存在严重不平衡且常规迁移失败
+
+关键检查：
+
+确认目标任务允许迁移到当前CPU（cpus_ptr掩码检查）
+
+如果禁止迁移，跳转到out_one_pinned标记的清理代码
+启动主动负载均衡
+
+```c
+if (!busiest->active_balance) {
+    busiest->active_balance = 1;
+    busiest->push_cpu = this_cpu;
+    active_balance = 1;
+```
+原子标记：设置active_balance标志防止重复触发
+
+目标CPU：记录待迁移的目标CPU（push_cpu）
+异步迁移任务
+
+```c
+stop_one_cpu_nowait(cpu_of(busiest),
+    active_load_balance_cpu_stop, busiest,
+    &busiest->active_balance_work);
+```
+异步执行：在繁忙CPU上调度active_load_balance_cpu_stop工作队列
+
+
+## migration线程
+
+migration线程是用于进行处理主动负载均衡的一个内核线程。
 
 为什么需要主动均衡？​​
-​​(1) 常规均衡的局限性​​
-​​任务执行导致无法迁移​​：
-常规均衡（如 detach_tasks）只能迁移 ​​就绪态任务​​（在运行队列中等待的任务）。如果源CPU的任务 ​​正在执行​​（busiest->curr），常规均衡无法直接迁移它。
-例如：一个CPU密集型任务长时间占用源CPU，导致调度器没有机会将其移出。
-​​锁竞争或延迟问题​​：
-常规均衡可能在分离任务时因锁冲突失败（如 rq->lock 竞争）。
-​​(2) 目标CPU闲置的浪费​​
-如果目标CPU持续空闲，而源CPU因任务卡住无法释放负载，会导致 ​​系统吞吐量下降​​ 和 ​​能效降低​​。
+​
+1. ​常规均衡的局限性​​：
+   * ​任务执行导致无法迁移​​：常规均衡（如 detach_tasks）只能迁移 ​​就绪态任务​​（在运行队列中等待的任务）。如果源CPU的任务 ​​正在执行​​（busiest->curr），常规均衡无法直接迁移它。例如一个CPU密集型任务长时间占用源CPU，导致调度器没有机会将其移出。
+	* ​锁竞争或延迟问题​​：常规均衡可能在分离任务时因锁冲突失败（如 rq->lock 竞争）。
+2. 目标CPU闲置的浪费​​
+   如果目标CPU持续空闲，而源CPU因任务卡住无法释放负载，会导致 ​​系统吞吐量下降​​ 和 ​​能效降低​​。
 
-主动均衡如何解决问题？​​
+主动均衡如何解决问题？
+
 通过 ​​强制迁移源CPU的当前任务​​：
 
-​​异步抢占机制​​：
-调用 stop_one_cpu_nowait() 向源CPU发送 ​​处理器间中断（IPI）​​，强制其执行 active_load_balance_cpu_stop。
+​1. ​异步抢占机制​​：
+
+调用 stop_one_cpu_nowait() 向源CPU发送 ​​处理器间中断（IPI）​​，强制其执行active_load_balance_cpu_stop。
 该函数会抢占当前任务，将其从源CPU迁移到目标CPU（通过 migrate_task_to）。
-​​绕过常规限制​​：
-主动均衡直接操作 ​​运行中任务​​，而常规均衡只能操作就绪队列中的任务。
-类似于“强制驱逐”繁忙CPU的任务。
+
+​2. ​绕过常规限制​​：
+
+主动均衡直接操作 ​​运行中任务​​，而常规均衡只能操作就绪队列中的任务。类似于“强制驱逐”繁忙CPU的任务。
 
 
