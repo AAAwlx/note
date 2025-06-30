@@ -33,7 +33,235 @@ struct cpu_dbs_info {
 
 ## 接口
 
-### 初始化
+### 初始化 sugov
+
+这里根据在初始化过程中的作用分为两个阶段：
+
+```
+sugov_init()
+├─ 阶段一：基础初始化
+│   ├─ 检查 policy->governor_data
+│   ├─ 启用 fast_switch
+│   ├─ 分配 sg_policy
+│   └─ 创建线程（慢速路径）
+│       ├─ 成功 → 进入阶段二
+│       └─ 失败 → 回滚（free_sg_policy → disable_fast_switch）
+│
+└─ 阶段二：Tunables 初始化
+    ├─ 加全局锁
+    ├─ 复用或分配 tunables
+    │   ├─ 成功 → 完成初始化
+    │   └─ 失败 → 回滚（stop_kthread → 阶段一回滚）
+    └─ 释放锁
+```
+
+**阶段一：基础资源分配与快速切换启用​**
+
+完成​​策略（policy）的基础初始化​​，包括启用快速切换、分配内存、创建线程等。
+若此阶段失败，需回滚已分配的资源（如内存、线程）。
+
+```c
+	/* 1.确保此策略尚未初始化调速器 */
+	if (policy->governor_data)
+		return -EBUSY;
+
+	/* 2.启用策略的快速频率切换 */
+	cpufreq_enable_fast_switch(policy);
+
+	/* 3.为 schedutil 策略结构分配内存 */
+	sg_policy = sugov_policy_alloc(policy);
+	if (!sg_policy) {
+		ret = -ENOMEM;
+		goto disable_fast_switch;
+	}
+
+	/* 4.如果需要，为慢路径更新创建内核线程 */
+	ret = sugov_kthread_create(sg_policy);
+	if (ret)
+		goto free_sg_policy;
+
+```
+
+**1.检查是否有旧的调频策略未卸载** 
+
+struct cpufreq_policy 的 governor_data 会指向当前 governor policy 对象，要把 sugov设置为当前 governor，那么旧的 governor 应该完成 stop 和 exit 动作。如果此时旧的策略已经被卸载那么 governor_data 为空，可以对策略进行初始化。否则说明旧的策略还存在无法对当前策略进行初始化，返回 -EBUSY。
+
+**2.使能 fast switch 功能（快路径更新）** 
+
+调用 cpufreq_enable_fast_switch 来使能 fast switch 功能。​​Fast Switch（快速频率切换）​​ 是一种优化机制，允许 CPU 频率在​​调度器上下文（如任务切换时）直接调整​​，而无需经过传统的异步通知流程。它的核心目标是​​降低频率切换的延迟​​，提高系统的响应速度和能效。
+这里的使能只是指 sugov policy 层 enable fast switch，具体是否支持还要看底层 cpufreq 驱动。这里为了标志底层是否支持，引入了 fast_switch_possible 和 fast_switch_enabled。两个参数。
+
+```c
+	/*
+	 * 快速切换标志：
+	 * - fast_switch_possible：如果驱动程序能够保证可以在共享该策略的任何CPU上更改频率，
+	 *   并且更改将影响所有策略CPU，则应由驱动程序设置。
+	 * - fast_switch_enabled：由支持快速频率切换的调节器设置，
+	 *   通过调用 cpufreq_enable_fast_switch() 实现。
+	 */
+	bool			fast_switch_possible;
+	bool			fast_switch_enabled;
+```
+
+如果底层驱动支持快速切频功能，那么cpufreq driver必须提供fast_switch的回调函数，这时候cpufreq policy的fast_switch_possible 等于true，表示驱动支持任何上下文（包括中断上下文）的频率切换。只有上下打通（上指governor，下指driver），CPU 频率切换才走 fast switch 路径。
+
+且 fast switch 和 cpufreq transition notifier 之间具有互斥性
+
+cpufreq transition notifier​​：
+
+这是传统的频率切换通知机制。当 CPU 频率即将改变（PRECHANGE）或已完成改变（POSTCHANGE）时，内核会通过通知链（notifier chain）调用其他模块注册的回调函数（callback）。这些回调可能涉及复杂的操作（如调整时钟、电源管理等），且​​可能是阻塞的​​（例如等待硬件响应或持有锁）。
+
+​​fast switch​​：
+
+这是为了快速切换频率而设计的机制，要求切换过程必须是​​非阻塞且原子化​​的（不能睡眠、不能被打断）。因此，它​​无法兼容传统的 notifier 机制​​，因为 notifier 的回调可能阻塞，而 fast switch 不允许等待。
+
+虽然 fast switch 移除了 notifier 机制，但​​频率切换的串行化​​（防止并发修改）仍需保证。因此：
+
+调用 cpufreq_driver_fast_switch 的模块（如 governor）必须​​自行实现同步​​（例如通过锁或原子操作），确保频率切换的原子性和线程安全。
+
+快速路径切换函数的实现：
+
+```c
+/**
+ * cpufreq_driver_fast_switch - 执行快速 CPU 频率切换。
+ * @policy: 要切换频率的 cpufreq 策略。
+ * @target_freq: 要设置的新频率（可能是近似值）。
+ *
+ * 执行快速频率切换，无需进入睡眠状态。
+ *
+ * 此函数调用的驱动程序的 ->fast_switch() 回调必须适合在 RCU-sched
+ * 读取侧临界区内调用，并且应选择大于或等于 @target_freq 的最小可用频率
+ * （CPUFREQ_RELATION_L）。
+ *
+ * 如果 policy->fast_switch_enabled 未设置，则不得调用此函数。
+ *
+ * 调用此函数的调节器必须保证它不会对同一策略并行调用两次，
+ * 并且不会与同一策略的 ->target() 或 ->target_index() 并行调用。
+ *
+ * 返回为 CPU 设置的实际频率。
+ *
+ * 如果驱动程序的 ->fast_switch() 回调返回 0 以指示错误条件，
+ * 则必须保留硬件配置。
+ */
+unsigned int cpufreq_driver_fast_switch(struct cpufreq_policy *policy,
+					unsigned int target_freq)
+{
+	unsigned int freq;
+	int cpu;
+
+	target_freq = clamp_val(target_freq, policy->min, policy->max);
+	freq = cpufreq_driver->fast_switch(policy, target_freq);
+
+	if (!freq)
+		return 0;
+
+	policy->cur = freq;
+	arch_set_freq_scale(policy->related_cpus, freq,
+				arch_scale_freq_ref(policy->cpu));
+	cpufreq_stats_record_transition(policy, freq);
+
+	if (trace_cpu_frequency_enabled()) {
+		for_each_cpu(cpu, policy->cpus)
+			trace_cpu_frequency(freq, cpu);
+	}
+
+	return freq;
+}
+EXPORT_SYMBOL_GPL(cpufreq_driver_fast_switch);
+```
+
+该函数会在更新cpu频率时被调用。sugov_update_single_freq/sugov_update_shared -> cpufreq_driver_fast_switch 。
+
+**3.分配内存对象**
+
+调用sugov_policy_alloc分配sugov policy对象，通过其policy成员建立和cpufreq framework的关联。
+
+**4.慢路径更新**
+
+​**​阶段二：Tunables 初始化与全局管理​​**
+
+处理与 ​​tunables（可调参数）​​ 相关的逻辑，包括复用全局参数或创建新参数。此阶段失败需额外回滚线程和全局锁。
+
+这里使用 sugov_tunables 结构体来记录频率调整的信息。
+
+```c
+// 定义 schedutil 调速器的 tunables 结构体
+struct sugov_tunables {
+	struct gov_attr_set	attr_set; // 属性集合，用于 sysfs 接口
+	unsigned int		rate_limit_us; // 频率更新的速率限制（以微秒为单位）
+};
+```
+
+全局 vs 每策略（per-cluster）的 tunables​​
+
+​​(1) 全局 tunables（global_tunables）​​
+* ​所有 policy 共享同一组参数​​：系统中所有 CPU 调频域（cluster）共用同一个 global_tunables，修改任一参数会影响所有 policy。
+* ​适用场景​​：硬件平台所有 cluster 的调频行为需要完全一致（较少见）。
+
+​​(2) 每策略 tunables（per-policy）​​
+* ​每个 policy 有自己的独立参数​​：不同 cluster 可以配置不同的调频参数（例如大核和小核设置不同的 rate_limit_us）。
+* ​手机典型场景​​：现代手机通常采用 ​​big.LITTLE 架构​​（如 1+3+4 三簇），不同 cluster 的负载特性和性能需求不同，因此需要独立的 tunables。
+
+```c
+	/* 检查全局 tunables 是否已存在 */
+	if (global_tunables) {
+		if (WARN_ON(have_governor_per_policy())) {
+			ret = -EINVAL;
+			goto stop_kthread;
+		}
+		/* 重用现有的全局 tunables */
+		policy->governor_data = sg_policy;
+		sg_policy->tunables = global_tunables;
+
+		gov_attr_set_get(&global_tunables->attr_set, &sg_policy->tunables_hook);
+		goto out;
+	}
+
+	/* 为调速器分配新的 tunables */
+	tunables = sugov_tunables_alloc(sg_policy);
+	if (!tunables) {
+		ret = -ENOMEM;
+		goto stop_kthread;
+	}
+
+	/* 设置频率更新的默认速率限制 */
+	tunables->rate_limit_us = cpufreq_policy_transition_delay_us(policy);
+
+	/* 将策略与调速器数据关联 */
+	policy->governor_data = sg_policy;
+	sg_policy->tunables = tunables;
+
+```
+
+**1.分配tunables结构**
+
+调用 sugov_tunables_alloc 函数分配 sugov_tunables 结构并将分配好的结构体注册到 policy 结构体中。该函数不仅分配内存还会建立 sugov_tunables 与 policy 之间的双向联系
+
+**2.cpufreq_policy_transition_delay_us**
+
+​​关于 CPU 调频间隔的三个控制参数​​
+这段描述解释了 Linux 内核中 ​​CPU 频率调节（cpufreq）​​ 的三个关键时间参数，它们共同决定了调频的最小时间间隔，以避免频繁切换频率导致性能或稳定性问题。以下是详细解析：
+
+​​(1) 硬件调频延迟（transition_latency）​​
+* ​定义​​：硬件从当前频率（F1）切换到目标频率（F2）并稳定下来所需的时间。
+* ​存储位置​​：struct cpufreq_policy → cpuinfo.transition_latency（单位：纳秒 ns）。
+* ​作用​​：反映 ​​硬件的物理限制​​。
+
+​​(2) Governor 调频间隔（rate_limit_us / freq_update_delay_ns）​​
+* ​定义​​：​sugov（或其他 governor）​​ 设定的最小调频间隔，避免软件层过于频繁地触发调频。
+* ​存储位置​​：struct sugov_tunables → rate_limit_us（单位：微秒 µs）。最终会转换freq_update_delay_ns（纳秒 ns）供内核使用。
+* ​作用​​：控制 ​​governor 调频的节奏​。
+  
+​​(3) 驱动调频间隔（transition_delay_us）​​
+* ​定义​​：​底层 cpufreq 驱动​​ 建议的最小调频间隔，可能基于硬件特性或经验值。
+* ​存储位置​​：struct cpufreq_policy → transition_delay_us（单位：微秒 µs）。
+* ​作用​​：驱动可以 ​​覆盖硬件默认值​​，提供更合理的调频间隔。
+
+**3.建立cpufreq framework和sugov的关联（初始化governor_data）**
+
+**4.初始化可调参数的sysfs接口**
+
+### 启动 sugov
 
 在初始化过程中会对回调函数进行注册。在 sugov_start 中会调用 cpufreq_add_update_util_hook 将回调函数注册到percpu的结构体当中。
 
@@ -104,9 +332,34 @@ void cpufreq_add_update_util_hook(int cpu, struct update_util_data *data,
 }
 ```
 
-### 更新频率
+### Sugov的停止
 
-在不同的调度器中更新频率时都会调用 cpufreq_update_util 函数来更新频率。
+sugov_stop执行逻辑大致如下：
+
+A、遍历该sugov policy（cluster）中的所有cpu，调用cpufreq_remove_update_util_hook注销sugov cpu的调频回调函数
+
+B、sugov_stop之后可能会调用sugov_exit来释放该governor所持有的资源，包括update_util_data对象。通过synchronize_rcu函数可以确保之前对update_util_data对象的并发访问都已经离开了临界区，从而后续可以安全释放。
+
+C、在不支持fast switch模式的时候，我们需要把pending状态状态的irq work和kthread work处理完毕，为后续销毁线程做准备
+
+### Sugov的退出
+
+sugov_exit主要功能是释放申请的资源，具体执行逻辑大致如下：
+
+A、断开cpufreq framework中的cpufreq policy和sugover的关联（即将其governor_data设置为NULL）
+
+B、调用sugov_tunables_free释放可调参数的内存（如果是多个policy共用一个可调参数对象，那么需要通过引用计数来判断是否还有sugov policy引用该对象）
+
+C、调用sugov_kthread_stop来消耗用于sugov调频的内核线程（仅用在不支持fast switch场景）
+
+D、调用sugov_policy_free释放sugov policy的内存
+
+E、调用cpufreq_disable_fast_switch来禁止本policy上的fast switch。
+
+
+## 更新负载
+
+在不同的调度器中更新负载时都会调用 cpufreq_update_util 函数来更新负载。
 
 以 cfs 中的调用为例：
 
