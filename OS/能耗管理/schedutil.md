@@ -33,6 +33,21 @@ struct cpu_dbs_info {
 
 ## 接口
 
+在 schedutil_gov 中注册了如下函数来应对不同的事件
+
+```c
+// 定义 schedutil 调速器的 cpufreq_governor 结构体
+struct cpufreq_governor schedutil_gov = {
+    .name			= "schedutil", // 调速器名称
+    .owner			= THIS_MODULE, // 所属模块
+    .flags			= CPUFREQ_GOV_DYNAMIC_SWITCHING, // 支持动态切换的标志
+    .init			= sugov_init, // 初始化函数
+    .exit			= sugov_exit, // 退出函数
+    .start			= sugov_start, // 启动函数
+    .stop			= sugov_stop, // 停止函数
+    .limits			= sugov_limits, // 频率限制更新函数
+};
+```
 ### 初始化 sugov
 
 这里根据在初始化过程中的作用分为两个阶段：
@@ -177,6 +192,8 @@ EXPORT_SYMBOL_GPL(cpufreq_driver_fast_switch);
 调用sugov_policy_alloc分配sugov policy对象，通过其policy成员建立和cpufreq framework的关联。
 
 **4.慢路径更新**
+
+
 
 ​**​阶段二：Tunables 初始化与全局管理​​**
 
@@ -356,6 +373,38 @@ D、调用sugov_policy_free释放sugov policy的内存
 
 E、调用cpufreq_disable_fast_switch来禁止本policy上的fast switch。
 
+### Sugov的限频
+
+Sugov 的限频会在限频参数有修改的时候被触发。这里通过 cpufreq_set_policy -> cpufreq_governor_limits -> governor->limits 最终调到注册的 sugov_limits。
+
+```c
+static void sugov_limits(struct cpufreq_policy *policy)
+{
+	struct sugov_policy *sg_policy = policy->governor_data;
+
+	// 如果未启用快速切换，则加锁更新策略限制
+	if (!policy->fast_switch_enabled) {
+		mutex_lock(&sg_policy->work_lock);
+		cpufreq_policy_apply_limits(policy);
+		mutex_unlock(&sg_policy->work_lock);
+	}
+
+	/*
+	 * 下面的 limits_changed 更新必须在 cpufreq_set_policy() 中
+	 * 更新策略限制之前完成，否则可能会错过策略限制的更新。
+	 * 使用写内存屏障确保这一点。
+	 *
+	 * 这与 sugov_should_update_freq() 中的内存屏障配对。
+	 */
+	smp_wmb();
+
+	// 设置 limits_changed 标志为 true
+	WRITE_ONCE(sg_policy->limits_changed, true);
+}
+```
+A、对于不支持fast switch的情况下，立刻调用cpufreq_policy_apply_limits函数使用最新的max和min来修正当前cpu频率，同时标记sugov policy中的limits_changed成员。
+
+B、对于支持fast switch的情况下，仅仅标记sugov policy中的limits_changed成员即可，并不立刻进行频率修正。后续在调用cpufreq_update_util函数进行调频的时候会强制进行一次频率调整。
 
 ## 更新负载
 
@@ -575,3 +624,82 @@ unlock:
 }
 ```
 
+**三个函数的区别与联系**
+
+
+|函数名|作用对象| 主要功能| 关键区别点|
+|----|----|----|----|
+|sugov_update_single_freq| 单个CPU| 更新单个CPU的频率（基于利用率计算）| 仅处理频率，不涉及性能调整|
+|sugov_update_single_perf| 单个CPU| 更新单个CPU的性能（若支持频率不变性），否则回退到 _freq 逻辑| 支持性能调优，依赖硬件特性|
+|sugov_update_shared| 共享CPU簇| 更新整个CPU簇（多核）的频率，基于所有CPU的最大利用率计算频率| 需加锁保护共享策略，避免竞争|
+
+_perf 函数通过 cpufreq_driver_adjust_perf() 直接调整性能级别（如Intel HWP），而 _freq 仅修改频率。
+
+共同目标​​：
+
+* 均用于动态调整CPU频率/性能，响应负载变化（通过 update_util_data 钩子触发）。
+* 最终可能调用 cpufreq_driver_fast_switch() 或延迟更新逻辑。
+  
+​​逻辑复用​​：
+* sugov_update_single_perf 在​​不支持频率不变性​​时，直接调用 sugov_update_single_freq。
+* 两者共享 sugov_update_single_common() 通用逻辑（检查是否需要更新）。
+
+​​性能与频率的关联​​：
+* _perf 函数通过 cpufreq_driver_adjust_perf() 直接调整性能级别（如Intel HWP），而 _freq 仅修改频率。
+
+**频率不变性​​**
+
+频率不变性​​是指 ​​CPU利用率（utilization）的计算与当前CPU运行频率无关​​。换句话说，无论CPU运行在1GHz还是3GHz，相同的实际工作量（如执行固定数量的指令）所计算出的利用率值应保持一致。
+
+在动态调频（DVFS）场景中，CPU频率会随负载变化而升降。若缺乏频率不变性，利用率计算会失真：
+
+1. ​高频时​​：CPU以3GHz运行，完成某任务仅需10ms，利用率计算为30%。
+2. ​低频时​​：同一任务在1GHz下需30ms，利用率可能错误计算为90%。
+
+​​结果​​：调度器和调频策略（如sugov）误判负载，导致次优决策（如不必要地升频）。频率不变性通过​​归一化​​处理，确保利用率反映真实负载，而非频率影响。
+
+
+### Sugov的频率调整间隔
+
+在调整频率前首先会 sugov_update_single_common sugov_should_update_freq 
+
+```c
+/**
+ * sugov_should_update_freq - 判断是否需要更新 CPU 频率
+ * @sg_policy: 指向 sugov_policy 结构体的指针
+ * @time: 当前时间戳（以纳秒为单位）
+ *
+ * 返回值:
+ * true  - 需要更新频率。
+ * false - 不需要更新频率。
+ */
+static bool sugov_should_update_freq(struct sugov_policy *sg_policy, u64 time)
+{
+    s64 delta_ns;
+
+    /* 检查当前 CPU 是否可以更新频率 */
+    if (!cpufreq_this_cpu_can_update(sg_policy->policy))
+        return false;
+
+    /* 如果频率限制发生变化，强制更新频率 */
+    if (unlikely(READ_ONCE(sg_policy->limits_changed))) {
+        WRITE_ONCE(sg_policy->limits_changed, false);
+        sg_policy->need_freq_update = true;
+        smp_mb(); // 写内存屏障，确保标志位更新的可见性
+
+        return true;
+    }
+
+    /* 计算当前时间与上次频率更新时间的间隔 */
+    delta_ns = time - sg_policy->last_freq_update_time;
+
+    /* 如果时间间隔超过最小更新间隔，则需要更新频率 */
+    return delta_ns >= sg_policy->freq_update_delay_ns;
+}
+```
+
+此函数用于确定是否需要更新 CPU 的频率。它会检查以下条件：
+1. 当前 CPU 是否可以更新频率。
+2. 是否有频率限制的变化。
+3. 距离上次频率更新的时间间隔是否超过了设定的最小更新间隔。
+ 
