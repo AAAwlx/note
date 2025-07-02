@@ -699,7 +699,302 @@ static bool sugov_should_update_freq(struct sugov_policy *sg_policy, u64 time)
 ```
 
 此函数用于确定是否需要更新 CPU 的频率。它会检查以下条件：
-1. 当前 CPU 是否可以更新频率。
-2. 是否有频率限制的变化。
-3. 距离上次频率更新的时间间隔是否超过了设定的最小更新间隔。
- 
+1. 当前 CPU 是否可以更新频率。不同硬件平台有不同的限制，有些平台频率调整寄存器是per-CPU的，只能调整自己所在cluster的频率。 
+ ```c
+   /**
+   * cpufreq_this_cpu_can_update - 检查当前 CPU 是否可以更新 cpufreq 策略。
+   * @policy: 要检查的 cpufreq 策略。
+   *
+   * 如果以下条件满足，则返回 'true'：
+   * - 本地和远程 CPU 共享 @policy，
+   * - @policy 中设置了 dvfs_possible_from_any_cpu，并且本地 CPU 没有即将离线
+   *   （在这种情况下，不再期望它运行 cpufreq 更新）。
+   */
+  bool cpufreq_this_cpu_can_update(struct cpufreq_policy *policy)
+  { 
+	return cpumask_test_cpu(smp_processor_id(), policy->cpus) ||
+		(policy->dvfs_possible_from_any_cpu &&
+		 rcu_dereference_sched(*this_cpu_ptr(&cpufreq_update_util_data)));
+  }
+```
+2. 检查 limits_changed 是否为true，如果为真则绕过后面对时间差限制的检查直接返回true。这一个值通过函数 ignore_dl_rate_limit 来设置。用于​​在 Deadline (DL) 调度类任务增加 CPU 带宽需求时，绕过 CPU 频率调控（sugov）的常规速率限制，强制触发频率更新​​。
+3. 计算上次调频到现在的时间差（delta_ns）只有超过预设的延迟时间（freq_update_delay_ns）才允许调频，避免过于频繁的调频操作，平衡性能和功耗。
+
+### 计算更新的频率
+
+```c
+// 获取 CPU 的利用率
+static void sugov_get_util(struct sugov_cpu *sg_cpu, unsigned long boost)
+{
+	// 定义最小值、最大值和利用率变量，初始利用率从 SCX 获取
+	unsigned long min, max, util = scx_cpuperf_target(sg_cpu->cpu);
+
+	// 如果未切换到 SCX，则增加 CFS 的利用率提升
+	if (!scx_switched_all())
+		util += cpu_util_cfs_boost(sg_cpu->cpu);
+
+	// 计算 CPU 的有效利用率，同时获取最小和最大值
+	util = effective_cpu_util(sg_cpu->cpu, util, &min, &max);
+
+	// 利用率取最大值（当前利用率和 IO 提升值）
+	util = max(util, boost);
+
+	// 更新 sugov_cpu 的最小带宽
+	sg_cpu->bw_min = min;
+
+	// 计算并更新 sugov_cpu 的有效性能
+	sg_cpu->util = sugov_effective_cpu_perf(sg_cpu->cpu, util, min, max);
+}
+```
+
+#### effective_cpu_util
+
+在 effective_cpu_util 中会逻辑是综合多个调度类（CFS、RT、DL）和干扰因素（IRQ、steal-time）的利用率，最终输出一个 ​​0 ~ scale（最大容量）​​ 之间的值。
+
+```c
+unsigned long effective_cpu_util(int cpu, unsigned long util_cfs,
+				 unsigned long *min,
+				 unsigned long *max)
+{
+	unsigned long util, irq, scale;
+	struct rq *rq = cpu_rq(cpu);
+
+	scale = arch_scale_cpu_capacity(cpu);
+    /**1. 初始化与 IRQ 处理​**/
+	irq = cpu_util_irq(rq);
+	if (unlikely(irq >= scale)) {
+		if (min)
+			*min = scale;
+		if (max)
+			*max = scale;
+		return scale;
+	}
+    /**2. 计算最低利用率（min）**/
+	if (min) {
+		*min = max(irq + cpu_bw_dl(rq), uclamp_rq_get(rq, UCLAMP_MIN));
+		if (!uclamp_is_used() && rt_rq_is_runnable(&rq->rt))
+			*min = max(*min, scale);
+	}
+    /**3. 计算实际利用率（util）​**/
+	util = util_cfs + cpu_util_rt(rq);
+	util += cpu_util_dl(rq);
+
+	if (max)
+		*max = min(scale, uclamp_rq_get(rq, UCLAMP_MAX));
+
+	if (util >= scale)
+		return scale;
+    /**4. 调整 IRQ 影响​ ​**/
+	util = scale_irq_capacity(util, irq, scale);
+	util += irq;
+
+	return min(scale, util);
+}
+
+```
+
+**1. 初始化与 IRQ 处理​**
+​​IRQ 饱和检查​​：若 IRQ 利用率超过 CPU 最大容量（可能是跟踪误差），直接返回 scale（避免无效计算）。
+
+**2. 计算最低利用率（min）**
+
+​​DL 带宽（cpu_bw_dl）​​：DL 任务的最小带宽需求（runtime / period）。
+
+​​UCLAMP_MIN​​：用户通过 sched_setattr() 设置的任务利用率下限。
+
+​​RT 任务特殊处理​​：若无 uclamp 且 RT 任务可运行，必须保证 CPU 以最高性能运行（避免 RT 延迟）。
+
+**3. 计算实际利用率（util）​**
+
+​​CFS + RT + DL​​：三者利用率直接相加（因为它们的 PELT 窗口同步，度量一致）。
+​​UCLAMP_MAX​​：用户设置的任务利用率上限（可能限制最终频率）。
+
+**4. 调整 IRQ 影响​ ​**
+
+​​IRQ（中断）和 steal-time（如虚拟机中被其他 CPU 偷取的时间）未被统计在任务的运行时间（rq->clock_task）中​​，但实际占用了 CPU 资源。如果不调整，会导致 ​​CPU 利用率被低估​​，进而引发频率选择不足、性能下降的问题。
+
+缩放公式：
+$$
+U' = \text{irq} + \frac{\text{scale} - \text{irq}}{\text{scale}} \times U_{\text{task}}
+$$
+
+物理意义​​：IRQ 占用后剩余的资源按比例分配给任务。
+
+#### 计算簇的更新频率
+
+对于只有一个cpu的cluster，cpu utility就是cluster的utility，对于cluster内有多个cpu的情况，这里需要遍历cluster中的cpu，找到cluster utility（用来映射cluster频率的utility），具体的代码实现在 sugov_next_freq_shared 函数中：
+
+```c
+// 更新共享 CPU 的频率
+static void
+sugov_update_shared(struct update_util_data *hook, u64 time, unsigned int flags)
+{
+	// 获取 sugov_cpu 结构体
+	struct sugov_cpu *sg_cpu = container_of(hook, struct sugov_cpu, update_util);
+	// 获取 sugov_policy 结构体
+	struct sugov_policy *sg_policy = sg_cpu->sg_policy;
+	// 下一个频率
+	unsigned int next_f;
+
+	// 加锁保护共享策略的更新
+	raw_spin_lock(&sg_policy->update_lock);
+
+	// 更新 IO 等待提升状态
+	sugov_iowait_boost(sg_cpu, time, flags);
+	// 更新最后一次更新时间
+	sg_cpu->last_update = time;
+
+	// 忽略 DL 速率限制
+	ignore_dl_rate_limit(sg_cpu);
+
+	// 如果需要更新频率
+	if (sugov_should_update_freq(sg_policy, time)) {
+		// 计算共享 CPU 的下一个频率
+		next_f = sugov_next_freq_shared(sg_cpu, time);
+
+		// 如果频率未改变，则无需更新
+		if (!sugov_update_next_freq(sg_policy, time, next_f))
+			goto unlock;
+
+		// 如果启用了快速切换，则直接切换到下一个频率
+		if (sg_policy->policy->fast_switch_enabled)
+			cpufreq_driver_fast_switch(sg_policy->policy, next_f);
+		else
+			// 否则延迟更新频率
+			sugov_deferred_update(sg_policy);
+	}
+
+unlock:
+	// 解锁
+	raw_spin_unlock(&sg_policy->update_lock);
+}
+```
+
+在 CPU 调频（DVFS）和任务调度中，处理 同构（homogeneous） 和 异构（heterogeneous） CPU 集群时，对 Utility（利用率） 和 Capacity（算力） 的比较逻辑有所不同。以下是分场景的规则和公式说明：
+
+**同构 CPU 集群（相同微架构）**
+
+条件：  
+Cluster 内所有 CPU 的微架构相同（如 Arm A55 小核集群）。  
+
+最大算力（capacity）相同，即 arch_scale_cpu_capacity(cpu) 返回值一致。
+
+决策规则：  
+直接选择 Utility 绝对值最大 的 CPU 作为调频或任务迁移的目标。  
+公式：  
+$$
+\text{target\_cpu} = \arg\max_{\text{cpu} \in \text{cluster}} \left( \text{util}_{\text{cpu}} \right)
+$$
+示例：  
+CPU0: util = 600（60%）, capacity = 1024  
+
+CPU1: util = 800（80%）, capacity = 1024  
+
+选择 CPU1（因其 util 更高）。
+
+**异构 CPU 集群（不同微架构）**
+
+条件：Cluster 内 CPU 的微架构不同（如 Arm 的 大核（Cortex-X） 和 小核（Cortex-A））。  最大算力（capacity）不同，例如大核 capacity = 1536，小核 capacity = 1024。
+
+决策规则：选择单位算力的利用率（Utility/Capacity）最高的 CPU，以公平比较不同性能的 CPU 负载。  
+公式：  
+$$
+\text{target\_cpu} = \arg\max_{\text{cpu} \in \text{cluster}} \left( \frac{\text{util}_{\text{cpu}}}{\text{capacity}_{\text{cpu}}} \right)
+$$
+示例：  
+
+大核 CPU0: util = 900, capacity = 1536 → util/capacity = 0.586  
+
+小核 CPU1: util = 700, capacity = 1024 → util/capacity = 0.684  
+
+选择 CPU1（因其单位算力负载更高，更需调频或迁移任务）。
+
+### 将cluster utility映射到具体的频率
+
+```c
+static unsigned int get_next_freq(struct sugov_policy *sg_policy,
+				  unsigned long util, unsigned long max)
+{
+	struct cpufreq_policy *policy = sg_policy->policy;
+	unsigned int freq;
+
+	// 1.获取参考频率
+	freq = get_capacity_ref_freq(policy);
+	// 2.根据利用率映射到频率
+	freq = map_util_freq(util, freq, max);
+
+	// 如果频率未改变且不需要更新频率，则直接返回当前频率
+	if (freq == sg_policy->cached_raw_freq && !sg_policy->need_freq_update)
+		return sg_policy->next_freq;
+
+	// 缓存原始频率
+	sg_policy->cached_raw_freq = freq;
+	// 解析并返回最终频率
+	return cpufreq_driver_resolve_freq(policy, freq);
+}
+```
+
+**(1) 获取参考频率**
+
+如果利用率是频率不变的，则选择新频率与其成比例，即：next_freq = C * max_freq * util / max 否则，利用 util_raw * (curr_freq / max_freq) 来近似频率不变的利用率。
+
+同时在这里我们需要保留 20% 的余量。为了 utility 能够匹配当前算力在计算时令 C = 1.25。这里的 C = 1.25 是 ​​倒数关系​​（1 / 0.8 = 1.25），确保 80% 利用率时频率达到 max_freq。
+
+```c
+static __always_inline
+unsigned long get_capacity_ref_freq(struct cpufreq_policy *policy)
+{
+	unsigned int freq = arch_scale_freq_ref(policy->cpu);
+
+	// 如果架构提供了参考频率，则直接返回
+	if (freq)
+		return freq;
+
+	// 如果频率是频率不变的，则返回 CPU 的最大频率
+	if (arch_scale_freq_invariant())
+		return policy->cpuinfo.max_freq;
+
+	/*
+	 * 应用 25% 的余量，以便在 CPU 完全忙碌之前选择一个高于当前频率的频率：
+	 */
+	return policy->cur + (policy->cur >> 2);
+}
+```
+
+
+这里为什么需要预留？
+
+|原因​​	|​具体表现​​	|​解决方案​​|
+|---|---|---|
+|突发负载|	瞬时任务导致 util 骤增，可能超出当前频率能力。|	预留 20% 算力缓冲。|
+|频率震荡|	高频调频增加功耗和延迟。|	提前升频，减少波动。|
+|调度/调频延迟|	从检测到响应需要时间。	|余量覆盖延迟期负载。|
+|非线性负载（如内存瓶颈）|	util 可能低估实际需求。|	额外算力补偿潜在误差。|
+|能效平衡|	避免长期满载（高耗电）或过度降频（性能差）。|	20% 为经验最优值。
+
+**​​(2) 计算理论目标频率​​**
+计算逻辑：
+
+若任务负载是 频率不变型（如纯计算任务）：
+
+$$
+\text{freq} = 1.25 \times \text{max\_freq} \times \frac{\text{util}}{\text{max}}
+$$
+
+若任务负载是 频率可变型（如内存密集型任务）：
+$$
+    \text{freq} = 1.25 \times \text{curr\_freq} \times \frac{\text{util\_raw}}{\text{max}}
+$$
+
+**(3)解析实际频率档位**
+
+因为硬件频率是离散的（如 [600MHz, 800MHz, 1.2GHz, 1.5GHz]），而计算的 freq 可能是任意值（如 1.1 GHz）。所以这里硬件驱动最终调整到的频率并不是先前计算得到的 freq。在这里还需要对其进行解析
+
+解析策略（由驱动决定）：
+
+* 向上取最小频点：选择 ≥ freq 的最小档位（如 1.1 GHz → 1.2 GHz）。保守策略，优先性能
+* 向下取最大频点：选择 ≤ freq 的最大档位（如 1.1 GHz → 800 MHz）。节能策略，可能牺牲性能
+* 最接近频点：选择距离 freq 最近的档位（如 1.1 GHz → 1.2 GHz）。平衡策略，通用默认行为
+
+## iowait boost
+

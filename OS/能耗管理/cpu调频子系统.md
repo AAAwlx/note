@@ -519,7 +519,10 @@ struct od_dbs_tuners {
 ```
 
 * `load_ratio`：是 Linux CPU 频率调控（CPUFreq）中 `ondemand` 调速器 的一个关键参数，用于 控制滑动平均负载（`load_avg_curr`）的计算方式
-  ![alt text](image.png)
+$$
+\text{load\_avg\_curr} = \frac{(100 - \text{load\_ratio}) \times \text{当前负载} + \text{load\_ratio} \times \text{历史平均}}{100}
+$$
+
   * 值越大：历史负载的权重越高，调频响应越平滑（适合稳定负载）。  
 
   * 值越小：当前负载的权重越高，调频响应越灵敏（适合突发负载）。
