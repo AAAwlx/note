@@ -410,7 +410,11 @@ B、对于支持fast switch的情况下，仅仅标记sugov policy中的limits_c
 
 在不同的调度器中更新负载时都会调用 cpufreq_update_util 函数来更新负载。
 
-以 cfs 中的调用为例：
+以 cfs 中的调用为例，在 update_load_avg 函数中，​​cfs_rq_util_change 的调用条件​​是负载发生显著变化（decayed == true）且不属于任务迁移场景（DO_ATTACH 或 DO_DETACH）。
+
+```
+update_load_avg -> cfs_rq_util_change -> cpufreq_update_util -> data->func()
+```
 
 ```c
 static inline void cfs_rq_util_change(struct cfs_rq *cfs_rq, int flags)
@@ -731,7 +735,7 @@ static void sugov_get_util(struct sugov_cpu *sg_cpu, unsigned long boost)
 
 	// 如果未切换到 SCX，则增加 CFS 的利用率提升
 	if (!scx_switched_all())
-		util += cpu_util_cfs_boost(sg_cpu->cpu);
+		util += cpu_util_cfs_boost(sg_cpu->cpu);// 这里获取到的 cfs_util 来自 cfs_rq->avg.util_avg 
 
 	// 计算 CPU 的有效利用率，同时获取最小和最大值
 	util = effective_cpu_util(sg_cpu->cpu, util, &min, &max);

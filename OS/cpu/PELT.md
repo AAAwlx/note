@@ -96,7 +96,78 @@ u_0 + u_1*y + u_2*y^2 + u_3*y^3 + ...
 
 load_avg = u_0` + y*(u_0 + u_1*y + u_2*y^2 + ...)
 
-函数执行流：
+### 初始化load avg
+
+Load avg的初始化分成两个阶段，第一个阶段在创建sched entity的时候（对于task se而言就是在fork的时候，对于group se而言，发生在创建cgroup的时候），调用init_entity_runnable_average函数完成初始化，第二个阶段在唤醒这个新创建se的时候，可以参考post_init_entity_util_avg函数的实现。Group se不可能被唤醒，因此第二阶段的se初始化仅仅适用于task se。
+
+在第一阶段初始化的时候，sched_avg对象的各个成员初始化为0是常规操作，不过task se的load avg初始化为最大负载值，即初始化为se的load weight。随着任务的运行，其load avg会慢慢逼近其真实的负载情况。对于group se而言，其load avg等于0，表示没有任何se附着在该group se上。
+
+一个新建任务的util avg设置为0是不合适的，其设定值应该和该task se挂入的cfs队列的负载状况以及CPU算力相关，但是在创建task se的时候，我们根本不知道它会挂入哪一个cfs rq，因此在唤醒一个新创建的任务的时候，我们会进行第二阶段的初始化。具体新建任务的util avg的初始化公式如下：
+
+util_avg = cfs_rq->util_avg / (cfs_rq->load_avg + 1) * se.load.weight
+
+当然，如果cfs rq的util avg等于0，那么任务初始化的util avg也就是0了，这样不合理，这时候任务的util avg被初始化为cpu算力的一半。
+
+完成了新建task se的负载和利用率的初始化之后，我们还会调用attach_entity_cfs_rq函数把这个task se挂入cfs---se的层级结构。虽然这里仅仅是给PELT大厦增加一个task se节点，但是整个PELT hierarchy都需要感知到这个新增的se带来的负载和利用率的变化。因此，除了把该task se的load avg加到cfs的load avg中，还需要把这个新增的负载沿着cfs---se的层级结构向上传播。类似的，这个新增负载也需要加入到task group中。具体请参考attach_entity_cfs_rq函数的实现。
+
+### 更新负载
+
+负载更新的入口点函数为 update_load_avg。在该函数中主要做了以下这几步。
+
+1. 更新本层级的 sched_entity 负载（__update_load_avg_se）​
+2. 更新该 se 所属的 cfs_rq 负载（update_cfs_rq_load_avg）
+3. 如果是 group se，处理向上传播的负载（仅在结构性变化时）​​
+4. 更新任务组（task_group）的负载（update_tg_load_avg）​​
+
+```c
+/* 更新任务及其 cfs_rq 的负载平均值 */
+static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
+{
+	u64 now = cfs_rq_clock_pelt(cfs_rq); // 获取当前时间
+	int decayed;
+
+	/*
+	 * 跟踪任务的负载平均值，以便在迁移后将其携带到新 CPU，
+	 * 并跟踪组调度实体的负载平均值，以便在迁移中计算 task_h_load。
+	 */
+	if (se->avg.last_update_time && !(flags & SKIP_AGE_LOAD))
+		__update_load_avg_se(now, cfs_rq, se); // 更新调度实体的负载平均值
+
+	decayed  = update_cfs_rq_load_avg(now, cfs_rq); // 更新 cfs_rq 的负载平均值
+	decayed |= propagate_entity_load_avg(se); // 传播调度实体的负载平均值
+
+	if (!se->avg.last_update_time && (flags & DO_ATTACH)) {
+		/*
+		 * DO_ATTACH 表示我们从 enqueue_entity() 调用此函数。
+		 * !last_update_time 表示我们已经通过 migrate_task_rq_fair()，
+		 * 这表明任务已迁移。
+		 *
+		 * 换句话说，我们正在将任务加入到新 CPU。
+		 */
+		attach_entity_load_avg(cfs_rq, se); // 将调度实体的负载平均值附加到 cfs_rq
+		update_tg_load_avg(cfs_rq); // 更新任务组的负载平均值
+
+	} else if (flags & DO_DETACH) {
+		/*
+		 * DO_DETACH 表示我们从 dequeue_entity() 调用此函数，
+		 * 并且我们正在将任务从 CPU 中迁移出去。
+		 */
+		detach_entity_load_avg(cfs_rq, se); // 从 cfs_rq 中分离调度实体的负载平均值
+		update_tg_load_avg(cfs_rq); // 更新任务组的负载平均值
+	} else if (decayed) {
+		cfs_rq_util_change(cfs_rq, 0); // 通知 cfs_rq 的负载发生变化
+
+		if (flags & UPDATE_TG)
+			update_tg_load_avg(cfs_rq); // 更新任务组的负载平均值
+	}
+}
+```
+
+**触发负载计算的时机**
+
+![alt text](../image/触发负载计算.png)
+
+**计算单个任务的负载**
 
 ![alt text](../image/计算负载.png)
 
@@ -193,9 +264,26 @@ static u32 __accumulate_pelt_segments(u64 periods, u32 d1, u32 d3)
 }
 ```
 
-触发负载计算的时机：
+**计算调度组的负载**
 
-![alt text](../image/触发负载计算.png)
+调度组的负载计算入口函数为 update_cfs_rq_load_avg 。这里的计算逻辑与计算单个任务的负载逻辑相似。
+
+但是这里如果存在多层级的 cfs_rq 即:
+
+```c
+​​task_se → group_B_cfs_rq → group_B_se → group_A_cfs_rq → group_A_se → root_cfs_rq
+```
+1. 隐式递归聚合​（tick 场景）
+
+	此时 ​​task_se 的改变只会影响上一层级的 group_B_cfs_rq 对应的负载。在更新了 group_B_cfs_rq 对应的负载后同时也会更新 group_B_cfs_rq 对应的权重。在下次有和 group_B_cfs_rq 同一层级的任务负载发生变化时会触发计算 group_A_cfs_rq 的负载，之后也会更新 group_A_cfs_rq 对应的权重。
+	
+	这样做的好处是
+   * ​避免高频跨层更新​​：若每次子级变化都触发父级更新，在深层次结构中会导致大量冗余计算（如 100 个任务触发 100 次根 cfs_rq 更新）。
+	* ​批量处理​​：通过等待同级更新或 Tick 事件，将多次子级变化合并到一次父级更新中。
+
+2. 显式传播（非 tick 场景）
+   
+   cfs---se层级结构有了调度实体的变化（新增或者移除），那么需要处理向上传播的负载。这里会调用 update_tg_load_avg 来实现。
 
 ## 时间计算
 
@@ -386,12 +474,25 @@ static s64 update_curr_se(struct rq *rq, struct sched_entity *curr)
 
 PELT 通过 calc_group_shares() 基于 load_avg 动态调整任务组的权重。  
 
+当任务组的 load_avg 更新后（通过 update_tg_load_avg），​​必须调用 update_cfs_group 重新计算其 group_se 的权重​​。
+
+这里以 enqueue_entity 为例：
+
+```c
+// enqueue_entity
+    update_load_avg(cfs_rq, se, UPDATE_TG | DO_ATTACH);
+	se_update_runnable(se);
+	update_cfs_group(se);
+```
+
 代码路径：  
 
-> reweight_task_fair() -> update_cfs_group -> calc_group_shares()
+update_cfs_group -> calc_group_shares()
 
 在 calc_group_shares 函数中会使用 cfs_rq 的 load_avg 来作为负载对任务权值进行调整，确保让对 CPU 需要更多的任务在 CPU 上运行更长的时间。
 
 calc_group_shares 中的实现：
 
 ![alt text](../image/calc_group_shares.png)
+
+这里的权重变更由父级向子级传播时的逻辑和负载的向上传播是类似的。
