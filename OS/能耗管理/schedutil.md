@@ -961,7 +961,6 @@ unsigned long get_capacity_ref_freq(struct cpufreq_policy *policy)
 }
 ```
 
-
 这里为什么需要预留？
 
 |原因​​	|​具体表现​​	|​解决方案​​|
@@ -996,5 +995,85 @@ $$
 * 向下取最大频点：选择 ≤ freq 的最大档位（如 1.1 GHz → 800 MHz）。节能策略，可能牺牲性能
 * 最接近频点：选择距离 freq 最近的档位（如 1.1 GHz → 1.2 GHz）。平衡策略，通用默认行为
 
-## iowait boost
+### 计算iowait boost
+
+在轻载场景下，CPU 可能只有一个 ​​重载 IO 任务​​（如数据库查询、文件读写）在运行。一开始 CPU 处于较高频率（如 2.0 GHz），但由于 IO 任务大部分时间在等待磁盘/网络，实际 CPU 计算时间很短，因此 CPU 利用率较低。schedutil 看到 util 很低，会降低 CPU 频率。频率降低后，IO 任务的计算部分运行变慢，导致​​单位时间内下发的 IO 命令减少​​，最终​降低 IO 吞吐量​​。
+
+因此这里需要因为一个专门针对 IO 密集型任务的策略即 iowait boost。在检测到 IO 密集型任务时，临时提升 CPU 频率，避免因降频导致 IO 吞吐量下降。以此作为对 IO 负载压力的补充，而不是只关注 CPU 的负载。
+
+iowait boost 机制通过动态调整 util，使 schedutil 误以为 CPU 很忙，从而维持较高频率。
+
+iowait boost算法过程如下：
+
+当 enqueu e一个处于 iowait 状态任务的时候，通过 cpufreq_update_util 来通知 sugov 模块发生了一次 SCHED_CPUFREQ_IOWAIT 类型的 cpu utility 变化。
+
+在 sugov callback 函数中调用 sugov_iowait_boost 来更新该CPU的 iowait boost状态。具体更新的规则如下表所示：
+
+![alt text](../image/iowait_boots.png)
+
+```c
+static void sugov_iowait_boost(struct sugov_cpu *sg_cpu, u64 time,
+				   unsigned int flags)
+{
+	bool set_iowait_boost = flags & SCHED_CPUFREQ_IOWAIT;
+
+	/* 如果 CPU 看起来足够空闲，则重置提升 */
+	if (sg_cpu->iowait_boost &&
+		sugov_iowait_reset(sg_cpu, time, set_iowait_boost))
+		return;
+
+	/* 仅提升在 IO 后唤醒的任务 */
+	if (!set_iowait_boost)
+		return;
+
+	/* 确保每次请求时提升仅加倍一次 */
+	if (sg_cpu->iowait_boost_pending)
+		return;
+	sg_cpu->iowait_boost_pending = true;
+
+	/* 每次请求时提升加倍 */
+	if (sg_cpu->iowait_boost) {
+		sg_cpu->iowait_boost =
+			min_t(unsigned int, sg_cpu->iowait_boost << 1, SCHED_CAPACITY_SCALE);
+		return;
+	}
+
+	/* IO 后首次唤醒：从最小提升开始 */
+	sg_cpu->iowait_boost = IOWAIT_BOOST_MIN;
+}
+```
+
+​在调用 sugov_get_util 函数获取 cpu utility 之后，通过调用sugov_iowait_apply 来获取 iowait boost 的 utility 值。如果 iowait boost 的 utility 比较大的话，那么用 iowait boost utility 来替代之前计算的 cpu utility。
+
+```
+sugov_next_freq_shared/sugov_update_single_common -> sugov_iowait_apply 
+```
+
+```c
+static unsigned long sugov_iowait_apply(struct sugov_cpu *sg_cpu, u64 time,
+				   unsigned long max_cap)
+{
+	/* 当前不需要提升 */
+	if (!sg_cpu->iowait_boost)
+		return 0;
+
+	/* 如果 CPU 看起来足够空闲，则重置提升 */
+	if (sugov_iowait_reset(sg_cpu, time, false))
+		return 0;
+    
+	if (!sg_cpu->iowait_boost_pending) {
+		/* 没有提升请求；减少提升值。*/
+		sg_cpu->iowait_boost >>= 1;
+		if (sg_cpu->iowait_boost < IOWAIT_BOOST_MIN) {
+			sg_cpu->iowait_boost = 0;
+			return 0;
+		}
+	}
+	sg_cpu->iowait_boost_pending = false;
+
+	return (sg_cpu->iowait_boost * max_cap) >> SCHED_CAPACITY_SHIFT;
+}
+```
+
+在这里使用 iowait_boost_pending 来表示 ​​当前是否有新的 I/O 等待任务请求 CPU 频率提升​​。当没有 IO 在等待 CPU 频率提升时就会对 iowait_boost 的值进行衰减。也就是说只有在 IO 吞吐量较大时 iowait_boost 才能维持一个比较高的水平进而生效。
 
