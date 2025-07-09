@@ -4,7 +4,7 @@
 
 路由表用来决定数据包如何从源地址转发到目标地址。在路由表中会记录目标网络，以及目标网络对应的一些信息
 
-![alt text](image.png)
+![alt text](../image/路由表.png)
 
 * Destination：目标网络，当目标网络为default（0.0.0.0）时，表示这个是默认网关，所有数据都发到这个网关。
 * Gateway：网关地址，即下一跳要转发到的路由器对应的ip，0.0.0.0 表示当前记录对应的 Destination 跟本机在同一个网段，不需要进行转发。
@@ -66,7 +66,7 @@ Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
 ## 邻居表
 邻居表维护 IP 地址与 MAC 地址的映射（IPv4 用 ARP，IPv6 用 NDP）。
 
-![alt text](image-1.png)
+![alt text](../image/邻居表.png)
 
 * Address​​：目标设备的 ​​IPv4 或 IPv6 地址
 * HWtype：网络接口的​​硬件类型，图中为
