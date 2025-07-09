@@ -109,60 +109,250 @@ sudo arp -s 192.168.1.200 00:1a:2b:3c:4d:02
 
 ## Netfilter
 
-Netfilter 表​​ 是 Linux 内核中用于实现 ​​防火墙和 ​网络地址转换的核心机制，它通过一系列规则表和链来控制数据包的流动。这里会用 iptable 命令来进行操作。
+Netfilter 表​​ 是 Linux 内核中用于实现​防火墙和​网络地址转换的核心机制，它通过一系列规则表和链来控制数据包的流动。这里会用 iptable 命令来进行操作。
+
+### Netfilter 中的表
+
+iptables 使用 table 来组织规则，根据不同的作用，将规则分为不同 table。例如，如果规则是处理网络地址转换的，那会放到 nat table，如果是判断是否允许包继续向前，那可能会放到 filter table。
 
 在 Netfilter 有以下的表：
 
-filter table：过滤（放行/拒绝）
-filter table 是最常用的 table 之一，用于判断是否允许一个包通过。
+**1.filter table：** 
 
-​​pkts​​	​​匹配该规则的数据包数量​​	100	表示已有 100 个数据包命中此规则。若为 0，说明近期无流量匹配。
-​​bytes​​	​​匹配该规则的数据包总字节数​​	5000	表示命中规则的数据包累计大小（单位：字节）。
-​​target​​	​​规则动作​​	ACCEPT、DROP、REJECT	对匹配流量的处理方式：
-- ACCEPT：允许
-- DROP：静默丢弃
-- REJECT：拒绝并返回错误。
+filter table 是最常用的 table 之一，用于判断是否允许一个包通过（放行/拒绝）。这个 table 提供了防火墙 的一些常见功能。
 
-在防火墙领域，这通常称作“过滤”包（”filtering” packets）。这个 table 提供了防火墙 的一些常见功能。
+**2.nat table：**
 
-nat table：网络地址转换
-nat table 用于实现网络地址转换规则。
+网络地址转换nat table 用于实现网络地址转换规则。当包进入协议栈的时候，这些规则决定是否以及如何修改包的源/目的地址，以改变包被 路由时的行为。nat table 通常用于将包路由到无法直接访问的网络。例如公网 IP 与私网 IP 的转换。
 
-当包进入协议栈的时候，这些规则决定是否以及如何修改包的源/目的地址，以改变包被 路由时的行为。nat table 通常用于将包路由到无法直接访问的网络。
+```
+Chain PREROUTING (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination         
+   10   640 DNAT       tcp  --  eth0   *       0.0.0.0/0            203.0.113.1         tcp dpt:80 to:192.168.1.100:80
 
-mangle table：修改 IP 头
-mangle（修正）table 用于修改包的 IP 头。
+Chain POSTROUTING (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination         
+  100  6400 MASQUERADE  all  --  *      eth1    192.168.1.0/24       0.0.0.0/0      
+```
 
-例如，可以修改包的 TTL，增加或减少包可以经过的跳数。
+第一条用于接收数据时，对于从 eth0 网卡进入的流量，destination=203.0.113.1 即目标为公网 IP 的数据包。按照  to:192.168.1.100:80：DNAT 规则将目标地址改为内网 IP 和端口。
+
+第二条用于发送数据时，对于从 out=eth1：流量从 eth1 网卡发出，source=192.168.1.0/24：即源IP为私网的数据包。自动使用 eth1 的当前公网 IP 做 SNAT（MASQUERADE）标志。
+
+**3.mangle table** 
+
+修改 IP 头，mangle table 用于修改包的 IP 头。例如，可以修改包的 TTL，增加或减少包可以经过的跳数。
 
 这个 table 还可以对包打只在内核内有效的“标记”（internal kernel “mark”），后 续的 table 或工具处理的时候可以用到这些标记。标记不会修改包本身，只是在包的内核 表示上做标记。
 
-raw table：conntrack 相关
-iptables 防火墙是有状态的：对每个包进行判断的时候是依赖已经判断过的包。
+**4.raw table** 
 
-建立在 netfilter 之上的连接跟踪（connection tracking）特性使得 iptables 将包 看作已有的连接或会话的一部分，而不是一个由独立、不相关的包组成的流。 数据包到达网络接口之后很快就会有连接跟踪逻辑判断。
+raw table用于跟踪网络连接状态 NAT、状态防火墙。
+
+建立在 netfilter 之上的连接跟踪（connection tracking）特性使得 iptables 将包看作已有的连接或会话的一部分，而不是一个由独立、不相关的包组成的流。 数据包到达网络接口之后很快就会有连接跟踪逻辑判断。
 
 raw table 定义的功能非常有限，其唯一目的就是提供一个让包绕过连接跟踪的框架。
 
-security table：打 SELinux 标记
+**5.security table**
+打 SELinux 标记
 security table 的作用是给包打上 SELinux 标记，以此影响 SELinux 或其他可以解读 SELinux 安全上下文的系统处理包的行为。这些标记可以基于单个包，也可以基于连接。
 
-​​prot​​	​​协议类型​​	tcp、udp、icmp、all	匹配的 IP 协议（all 表示任意协议）。
-​​opt​​	​​额外选项​​	--dport 80	扩展匹配条件（如端口、TCP标志等）。
-​​in​​	​​输入接口​​（数据包进入的网卡）	eth0、docker0	匹配从指定网卡进入的流量（* 表示任意接口）。
-​​out​​	​​输出接口​​（数据包离开的网卡）	eth1、!eth0	匹配从指定网卡离开的流量（! 表示排除）。
-​​source​​	​​源 IP 地址/网段​​	192.168.1.100、0.0.0.0/0	匹配来自指定 IP 的流量（0.0.0.0/0 表示任意地址）。
-​​destination​​	​​目标 IP 地址/网段​​	10.0.0.1、0.0.0.0/0	匹配发往指定 IP 的流量。
+表中字段的含义：
 
-每个表有五个默认的链，这个链代表了一些行为。
+target	DNAT	对数据包进行目标地址转换（Destination NAT）。
+prot	tcp	仅匹配 TCP 协议的数据包。
+in	eth0	数据包从 eth0 网卡进入（通常为公网接口）。
+source	0.0.0.0/0	匹配任意源 IP（即所有外部客户端）。
+destination	203.0.113.1
+
+### 默认的 hook 点与 chain
+
+在每个 table 内部，规则被进一步组织成 chain，内置的 chain 是由内置的 hook 触发 的。chain 基本上能决定（basically determin）规则何时被匹配。
+
+hook点：
+
+NF_IP_PRE_ROUTING: 接收到的包进入协议栈后立即触发此 hook，在进行任何路由判断之前
+NF_IP_LOCAL_IN: 接收到的包经过路由判断，如果目的是本机，将触发此 hook
+NF_IP_FORWARD: 接收到的包经过路由判断，如果目的是其他机器，将触发此 hook
+NF_IP_LOCAL_OUT: 本机产生的准备发送的包，在进入协议栈后立即触发此 hook
+NF_IP_POST_ROUTING: 本机产生的准备发送的包或者转发的包，在经过路由判断之后， 将触发此 hook
+
+内置的 chain 名字和 netfilter hook 名字是一一对应的：
+
+PREROUTING: 由 NF_IP_PRE_ROUTING hook 触发
+INPUT: 由 NF_IP_LOCAL_IN hook 触发
+FORWARD: 由 NF_IP_FORWARD hook 触发
+OUTPUT: 由 NF_IP_LOCAL_OUT hook 触发
+POSTROUTING: 由 NF_IP_POST_ROUTING hook 触发
 
 除了默认的链之外，用户也可以自己定义链。
 
-连接跟踪
-使用 Conntrack 指令来查看。
-​​作用​​：跟踪网络连接状态（用于 NAT、状态防火墙）。
+```sh
+iptables -N MY_CHAIN  # 创建自定义链
+iptables -A INPUT -j MY_CHAIN  # 将流量跳转到自定义链
+iptables -A MY_CHAIN -s 192.168.1.100 -j DROP  # 添加规则
+```
 
-![alt text](image-2.png)
+这里如果将默认的链上的流量跳转到自定义的链上则不需要自己单独写内核模块规定新的 hook 点。如果想要高度定制化的效果则需要自行编写内核模块。
+
+### 触发hook的位置
+
+Netfilter Hook 点被嵌入到内核网络协议栈的关键路径中，通过 NF_HOOK 宏触发。
+
+**(1) NF_IP_PRE_ROUTING**
+
+触发位置：在 ip_rcv()（IPv4 接收入口）中调用 nf_hook。
+
+• 源码路径：net/ipv4/ip_input.c
+  int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt, struct net_device *orig_dev) {
+      return NF_HOOK(NFPROTO_IPV4, NF_INET_PRE_ROUTING, 
+                     dev_net(dev), NULL, skb, dev, NULL,
+                     ip_rcv_finish); // 路由前处理
+  }
+  
+• 作用：在路由决策前处理（如 DNAT、包过滤）。
+
+**(2) NF_IP_LOCAL_IN**
+
+• 触发位置：路由判断目的为本机后，在 ip_local_deliver() 中调用。
+
+• 源码路径：net/ipv4/ip_input.c
+  int ip_local_deliver(struct sk_buff *skb) {
+      return NF_HOOK(NFPROTO_IPV4, NF_INET_LOCAL_IN,
+                     dev_net(skb->dev), NULL, skb, skb->dev, NULL,
+                     ip_local_deliver_finish); // 本机接收处理
+  }
+  
+• 作用：处理目标为本机的包（如防火墙规则）。
+
+**(3) NF_IP_FORWARD**
+
+• 触发位置：路由判断为转发后，在 ip_forward() 中调用。
+
+• 源码路径：net/ipv4/ip_forward.c
+  int ip_forward(struct sk_buff *skb) {
+      return NF_HOOK(NFPROTO_IPV4, NF_INET_FORWARD,
+                     dev_net(skb->dev), NULL, skb, skb->dev, NULL,
+                     ip_forward_finish); // 转发处理
+  }
+  
+• 作用：处理需要转发的包（如 FORWARD 链规则）。
+
+**(4) NF_IP_LOCAL_OUT**
+
+• 触发位置：本机发出的包在 __ip_local_out() 中调用。
+
+• 源码路径：net/ipv4/ip_output.c
+  int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb) {
+      return NF_HOOK(NFPROTO_IPV4, NF_INET_LOCAL_OUT,
+                     net, sk, skb, NULL, skb->dev,
+                     dst_output); // 本机发送处理
+  }
+  
+• 作用：处理本机生成的包（如 OUTPUT 链规则）。
+
+**(5) NF_IP_POST_ROUTING**
+
+• 触发位置：在 ip_output() 或 ip_finish_output() 中调用。
+
+• 源码路径：net/ipv4/ip_output.c
+  int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb) {
+      return NF_HOOK(NFPROTO_IPV4, NF_INET_POST_ROUTING,
+                     net, sk, skb, NULL, skb->dev,
+                     ip_finish_output); // 发送前最后处理
+  }
+  
+• 作用：处理即将发出的包（如 SNAT、MASQUERADE）。
+
+Hook 优先级与处理顺序
+
+Netfilter 模块通过 nf_hook_ops 结构体注册处理函数，并指定优先级。内核通过链表管理同一 Hook 点的多个处理函数，按优先级排序执行。
+
+(1) 注册示例（内核模块）
+
+static struct nf_hook_ops my_hook_ops = {
+    .hook     = my_hook_function,  // 处理函数
+    .pf       = NFPROTO_IPV4,      // 协议族
+    .hooknum  = NF_INET_PRE_ROUTING, // Hook 点
+    .priority = NF_IP_PRI_FIRST,   // 优先级（整数，越小越先执行）
+};
+
+// 注册 Hook
+nf_register_net_hook(net, &my_hook_ops);
+
+(2) 内核预定义优先级
+
+优先级定义在 include/uapi/linux/netfilter_ipv4.h：
+enum nf_ip_hook_priorities {
+    NF_IP_PRI_FIRST = INT_MIN,
+    NF_IP_PRI_CONNTRACK = -200,   // conntrack 模块
+    NF_IP_PRI_MANGLE = -150,      // mangle 表
+    NF_IP_PRI_NAT_DST = -100,     // DNAT
+    NF_IP_PRI_FILTER = 0,         // filter 表
+    NF_IP_PRI_NAT_SRC = 100,      // SNAT
+    NF_IP_PRI_LAST = INT_MAX,
+};
+
+
+(3) 执行逻辑
+
+当 NF_HOOK 被触发时，内核遍历该 Hook 点的处理函数链表：
+1. 按优先级从高到低（数值从小到大）依次调用。
+2. 每个处理函数返回 NF_DROP、NF_ACCEPT、NF_STOLEN 等结果。
+3. 若返回 NF_DROP，则终止处理并丢弃包；若 NF_ACCEPT，则继续下一个处理函数。
+
+关键数据结构与函数：
+
+(1) struct nf_hook_ops
+
+struct nf_hook_ops {
+    struct list_head list;       // 链表节点
+    nf_hookfn *hook;             // 处理函数
+    int priority;                // 优先级
+    unsigned int hooknum;        // Hook 点（如 NF_INET_PRE_ROUTING）
+    u_int8_t pf;                // 协议族（如 NFPROTO_IPV4）
+};
+
+
+(2) nf_hookfn 函数原型
+
+unsigned int my_hook_function(
+    void *priv,                  // 私有数据
+    struct sk_buff *skb,         // 数据包
+    const struct nf_hook_state *state // Hook 状态（设备、协议等）
+);
+
+
+(3) NF_HOOK 宏展开
+
+#define NF_HOOK(pf, hook, net, sk, skb, indev, outdev, okfn) \
+    nf_hook(pf, hook, net, sk, skb, indev, outdev, okfn)
+
+
+5. 性能影响与调试
+
+(1) 查看已注册的 Hook
+
+cat /proc/net/netfilter/nf_hook_list
+
+
+(2) 动态跟踪 Hook 调用（BPF）
+
+sudo bpftrace -e 'kprobe:nf_hook { printf("Hook: %d, dev: %s\n", arg2, kdevname(arg3->in)); }'
+
+
+(3) 性能优化建议
+
+• 减少高优先级模块的处理耗时（如 conntrack 开启 nf_conntrack_timestamp 会增加延迟）。
+
+• 避免在 NF_IP_PRE_ROUTING 或 NF_IP_LOCAL_OUT 中注册复杂逻辑（这些路径对延迟敏感）。
+
+总结
+
+Netfilter 的 Hook 机制通过 协议栈嵌入点 + 优先级调度 实现模块化包处理。理解其执行流程需要结合：
+1. 协议栈路径（如 ip_rcv() → ip_forward()）。
+2. Hook 触发时机（路由前、路由后等）。
+3. 优先级竞争（如 NAT 规则优先于过滤规则）。
 
 ​​路由表​​：struct fib_table (在 net/ipv4/fib_frontend.c)
 ​​邻居表​​：struct neigh_table (在 net/core/neighbour.c)
