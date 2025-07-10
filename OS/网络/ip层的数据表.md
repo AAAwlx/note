@@ -270,14 +270,69 @@ Netfilter 模块通过 nf_hook_ops 结构体注册处理函数，并指定优先
 
 (1) 注册示例（内核模块）
 
-static struct nf_hook_ops my_hook_ops = {
-    .hook     = my_hook_function,  // 处理函数
-    .pf       = NFPROTO_IPV4,      // 协议族
-    .hooknum  = NF_INET_PRE_ROUTING, // Hook 点
-    .priority = NF_IP_PRI_FIRST,   // 优先级（整数，越小越先执行）
+![](../image/iptable注册hook.png)
+
+```c
+struct nf_hook_ops *
+xt_hook_ops_alloc(const struct xt_table *table, nf_hookfn *fn)
+{
+	unsigned int hook_mask = table->valid_hooks;
+	uint8_t i, num_hooks = hweight32(hook_mask);
+	uint8_t hooknum;
+	struct nf_hook_ops *ops;
+
+	if (!num_hooks)
+		return ERR_PTR(-EINVAL);
+
+	ops = kcalloc(num_hooks, sizeof(*ops), GFP_KERNEL);
+	if (ops == NULL)
+		return ERR_PTR(-ENOMEM);
+
+	for (i = 0, hooknum = 0; i < num_hooks && hook_mask != 0;
+	     hook_mask >>= 1, ++hooknum) {
+		if (!(hook_mask & 1))
+			continue;
+		ops[i].hook     = fn;
+		ops[i].pf       = table->af;
+		ops[i].hooknum  = hooknum;
+		ops[i].priority = table->priority;
+		++i;
+	}
+
+	return ops;
+}
+EXPORT_SYMBOL_GPL(xt_hook_ops_alloc);
+```
+
+static const struct nf_hook_ops nf_nat_ipv4_ops[] = {
+	{
+		.hook		= ipt_do_table,
+		.pf		= NFPROTO_IPV4,
+		.hooknum	= NF_INET_PRE_ROUTING,
+		.priority	= NF_IP_PRI_NAT_DST,
+	},
+	{
+		.hook		= ipt_do_table,
+		.pf		= NFPROTO_IPV4,
+		.hooknum	= NF_INET_POST_ROUTING,
+		.priority	= NF_IP_PRI_NAT_SRC,
+	},
+	{
+		.hook		= ipt_do_table,
+		.pf		= NFPROTO_IPV4,
+		.hooknum	= NF_INET_LOCAL_OUT,
+		.priority	= NF_IP_PRI_NAT_DST,
+	},
+	{
+		.hook		= ipt_do_table,
+		.pf		= NFPROTO_IPV4,
+		.hooknum	= NF_INET_LOCAL_IN,
+		.priority	= NF_IP_PRI_NAT_SRC,
+	},
 };
 
 // 注册 Hook
+ipt_register_table nf_register_net_hooks nf_register_net_hook
 nf_register_net_hook(net, &my_hook_ops);
 
 (2) 内核预定义优先级
@@ -325,34 +380,275 @@ unsigned int my_hook_function(
 
 (3) NF_HOOK 宏展开
 
-#define NF_HOOK(pf, hook, net, sk, skb, indev, outdev, okfn) \
-    nf_hook(pf, hook, net, sk, skb, indev, outdev, okfn)
+NF_HOOK nf_hook nf_hook_slow nf_hook_entry_hookfn entry->hook（ipt_do_table）
+```c
+// 定义一个内联函数 NF_HOOK，用于调用 netfilter 钩子
+static inline int
+NF_HOOK(uint8_t pf, unsigned int hook, struct net *net, struct sock *sk, struct sk_buff *skb,
+	struct net_device *in, struct net_device *out,
+	int (*okfn)(struct net *, struct sock *, struct sk_buff *))
+{
+	// 调用 nf_hook 函数，执行指定的 netfilter 钩子
+	int ret = nf_hook(pf, hook, net, sk, skb, in, out, okfn);
 
+	// 如果钩子返回值为 1，表示数据包被允许通过，则调用 okfn 函数
+	if (ret == 1)
+		ret = okfn(net, sk, skb);
 
-5. 性能影响与调试
+	// 返回最终结果
+	return ret;
+}
+```
 
-(1) 查看已注册的 Hook
+```c
+static inline int nf_hook(u_int8_t pf, unsigned int hook, struct net *net,
+			  struct sock *sk, struct sk_buff *skb,
+			  struct net_device *indev, struct net_device *outdev,
+			  int (*okfn)(struct net *, struct sock *, struct sk_buff *))
+{
+	struct nf_hook_entries *hook_head = NULL;
+	int ret = 1;
 
-cat /proc/net/netfilter/nf_hook_list
+#ifdef CONFIG_JUMP_LABEL
+	// 如果协议族和钩子是常量，并且不需要钩子，则直接返回 1
+	if (__builtin_constant_p(pf) &&
+		__builtin_constant_p(hook) &&
+		!static_key_false(&nf_hooks_needed[pf][hook]))
+		return 1;
+#endif
 
+	rcu_read_lock();
+	switch (pf) {
+	case NFPROTO_IPV4:
+		// 获取 IPv4 协议的钩子条目
+		hook_head = rcu_dereference(net->nf.hooks_ipv4[hook]);
+		break;
+	case NFPROTO_IPV6:
+		// 获取 IPv6 协议的钩子条目
+		hook_head = rcu_dereference(net->nf.hooks_ipv6[hook]);
+		break;
+	case NFPROTO_ARP:
+#ifdef CONFIG_NETFILTER_FAMILY_ARP
+		// 检查 ARP 钩子索引是否超出范围
+		if (WARN_ON_ONCE(hook >= ARRAY_SIZE(net->nf.hooks_arp)))
+			break;
+		// 获取 ARP 协议的钩子条目
+		hook_head = rcu_dereference(net->nf.hooks_arp[hook]);
+#endif
+		break;
+	case NFPROTO_BRIDGE:
+#ifdef CONFIG_NETFILTER_FAMILY_BRIDGE
+		// 获取桥接协议的钩子条目
+		hook_head = rcu_dereference(net->nf.hooks_bridge[hook]);
+#endif
+		break;
+	default:
+		// 未知协议族，发出警告
+		WARN_ON_ONCE(1);
+		break;
+	}
 
-(2) 动态跟踪 Hook 调用（BPF）
+	if (hook_head) {
+		struct nf_hook_state state;
 
-sudo bpftrace -e 'kprobe:nf_hook { printf("Hook: %d, dev: %s\n", arg2, kdevname(arg3->in)); }'
+		// 初始化钩子状态
+		nf_hook_state_init(&state, hook, pf, indev, outdev,
+				   sk, net, okfn);
 
+		// 调用慢路径钩子处理函数
+		ret = nf_hook_slow(skb, &state, hook_head, 0);
+	}
+	rcu_read_unlock();
 
-(3) 性能优化建议
+	return ret;
+}
+```
 
-• 减少高优先级模块的处理耗时（如 conntrack 开启 nf_conntrack_timestamp 会增加延迟）。
+```c
+int nf_hook_slow(struct sk_buff *skb, struct nf_hook_state *state,
+		 const struct nf_hook_entries *e, unsigned int s)
+{
+	unsigned int verdict;
+	int ret;
 
-• 避免在 NF_IP_PRE_ROUTING 或 NF_IP_LOCAL_OUT 中注册复杂逻辑（这些路径对延迟敏感）。
+	// 遍历钩子条目，从索引 s 开始
+	for (; s < e->num_hook_entries; s++) {
+		// 调用钩子函数，获取判决结果
+		verdict = nf_hook_entry_hookfn(&e->hooks[s], skb, state);
+		switch (verdict & NF_VERDICT_MASK) {
+		case NF_ACCEPT:
+			// 如果判决为接受，继续下一个钩子
+			break;
+		case NF_DROP:
+			// 如果判决为丢弃，释放 skb 并返回错误码
+			kfree_skb_reason(skb,
+					 SKB_DROP_REASON_NETFILTER_DROP);
+			ret = NF_DROP_GETERR(verdict);
+			if (ret == 0)
+				ret = -EPERM;
+			return ret;
+		case NF_QUEUE:
+			// 如果判决为队列，调用 nf_queue 处理
+			ret = nf_queue(skb, state, s, verdict);
+			if (ret == 1)
+				continue; // 继续处理下一个钩子
+			return ret;
+		case NF_STOLEN:
+			// 如果判决为偷取，返回错误码
+			return NF_DROP_GETERR(verdict);
+		default:
+			// 如果判决为未知，发出警告并返回 0
+			WARN_ON_ONCE(1);
+			return 0;
+		}
+	}
 
-总结
+	// 所有钩子处理完成，返回 1 表示 okfn() 需要被调用
+	return 1;
+}
+```
 
-Netfilter 的 Hook 机制通过 协议栈嵌入点 + 优先级调度 实现模块化包处理。理解其执行流程需要结合：
-1. 协议栈路径（如 ip_rcv() → ip_forward()）。
-2. Hook 触发时机（路由前、路由后等）。
-3. 优先级竞争（如 NAT 规则优先于过滤规则）。
+```c
+unsigned int
+ipt_do_table(void *priv,
+		 struct sk_buff *skb,
+		 const struct nf_hook_state *state)
+{
+	const struct xt_table *table = priv;
+	unsigned int hook = state->hook;
+	static const char nulldevname[IFNAMSIZ] __attribute__((aligned(sizeof(long))));
+	const struct iphdr *ip;
+	/* 初始化 verdict 为 NF_DROP 以满足 gcc 的要求。 */
+	unsigned int verdict = NF_DROP;
+	const char *indev, *outdev;
+	const void *table_base;
+	struct ipt_entry *e, **jumpstack;
+	unsigned int stackidx, cpu;
+	const struct xt_table_info *private;
+	struct xt_action_param acpar;
+	unsigned int addend;
+
+	/* 初始化 */
+	stackidx = 0;
+	ip = ip_hdr(skb);
+	indev = state->in ? state->in->name : nulldevname;
+	outdev = state->out ? state->out->name : nulldevname;
+	/* 我们通过将第一个片段视为普通数据包来处理片段。
+	 * 所有其他片段将被正常处理，但它们永远不会匹配
+	 * 我们无法确定的规则，例如 TCP SYN 标志或端口。
+	 * 如果规则是片段特定规则，非片段将无法匹配。 */
+	acpar.fragoff = ntohs(ip->frag_off) & IP_OFFSET;
+	acpar.thoff   = ip_hdrlen(skb);
+	acpar.hotdrop = false;
+	acpar.state   = state;
+
+	WARN_ON(!(table->valid_hooks & (1 << hook)));
+	local_bh_disable();
+	addend = xt_write_recseq_begin();
+	private = READ_ONCE(table->private); /* 地址依赖性。 */
+	cpu        = smp_processor_id();
+	table_base = private->entries;
+	jumpstack  = (struct ipt_entry **)private->jumpstack[cpu];
+
+	/* 如果通过 TEE 调用，则切换到备用 jumpstack。
+	 * TEE 在原始 skb 上发出 XT_CONTINUE 判决，因此我们不能覆盖 jumpstack。
+	 *
+	 * 对于通过 REJECT 或 SYNPROXY 的递归，堆栈将被覆盖，
+	 * 但这不是问题，因为这些会发出绝对判决。 */
+	if (static_key_false(&xt_tee_enabled))
+		jumpstack += private->stacksize * __this_cpu_read(nf_skb_duplicated);
+
+	e = get_entry(table_base, private->hook_entry[hook]);
+
+	do {
+		const struct xt_entry_target *t;
+		const struct xt_entry_match *ematch;
+		struct xt_counters *counter;
+
+		WARN_ON(!e);
+		if (!ip_packet_match(ip, indev, outdev,
+			&e->ip, acpar.fragoff)) {
+ no_match:
+			e = ipt_next_entry(e);
+			continue;
+		}
+
+		xt_ematch_foreach(ematch, e) {
+			acpar.match     = ematch->u.kernel.match;
+			acpar.matchinfo = ematch->data;
+			if (!acpar.match->match(skb, &acpar))
+				goto no_match;
+		}
+
+		counter = xt_get_this_cpu_counter(&e->counters);
+		ADD_COUNTER(*counter, skb->len, 1);
+
+		t = ipt_get_target_c(e);
+		WARN_ON(!t->u.kernel.target);
+
+#if IS_ENABLED(CONFIG_NETFILTER_XT_TARGET_TRACE)
+		/* 数据包被跟踪：记录日志 */
+		if (unlikely(skb->nf_trace))
+			trace_packet(state->net, skb, hook, state->in,
+					 state->out, table->name, private, e);
+#endif
+		/* 标准目标？ */
+		if (!t->u.kernel.target->target) {
+			int v;
+
+			v = ((struct xt_standard_target *)t)->verdict;
+			if (v < 0) {
+				/* 从堆栈弹出？ */
+				if (v != XT_RETURN) {
+					verdict = (unsigned int)(-v) - 1;
+					break;
+				}
+				if (stackidx == 0) {
+					e = get_entry(table_base,
+						private->underflow[hook]);
+				} else {
+					e = jumpstack[--stackidx];
+					e = ipt_next_entry(e);
+				}
+				continue;
+			}
+			if (table_base + v != ipt_next_entry(e) &&
+				!(e->ip.flags & IPT_F_GOTO)) {
+				if (unlikely(stackidx >= private->stacksize)) {
+					verdict = NF_DROP;
+					break;
+				}
+				jumpstack[stackidx++] = e;
+			}
+
+			e = get_entry(table_base, v);
+			continue;
+		}
+
+		acpar.target   = t->u.kernel.target;
+		acpar.targinfo = t->data;
+
+		verdict = t->u.kernel.target->target(skb, &acpar);
+		if (verdict == XT_CONTINUE) {
+			/* 目标可能已更改内容。 */
+			ip = ip_hdr(skb);
+			e = ipt_next_entry(e);
+		} else {
+			/* 判决 */
+			break;
+		}
+	} while (!acpar.hotdrop);
+
+	xt_write_recseq_end(addend);
+	local_bh_enable();
+
+	if (acpar.hotdrop)
+		return NF_DROP;
+	else return verdict;
+}
+```
+
+![alt text](image.png)
 
 ​​路由表​​：struct fib_table (在 net/ipv4/fib_frontend.c)
 ​​邻居表​​：struct neigh_table (在 net/core/neighbour.c)
