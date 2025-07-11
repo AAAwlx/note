@@ -1,121 +1,13 @@
-# ip 层的表及其作用
 
-## 路由表
-
-路由表用来决定数据包如何从源地址转发到目标地址。在路由表中会记录目标网络，以及目标网络对应的一些信息
-
-![alt text](../image/路由表.png)
-
-* Destination：目标网络，当目标网络为default（0.0.0.0）时，表示这个是默认网关，所有数据都发到这个网关。
-* Gateway：网关地址，即下一跳要转发到的路由器对应的ip，0.0.0.0 表示当前记录对应的 Destination 跟本机在同一个网段，不需要进行转发。
-* Flags	
-  * U - Up表示有效
-  * G - Gateway表示连接路由，若无这个字段表示直连目的地址
-  * H - Host表示目标是具体主机，而不是网段
-  * R 恢复动态路由产生的表项
-  * D 由路由的后台程序动态地安装
-  * M 由路由的后台程序修改
-  * ! 拒绝路由
-* Metric：路由距离，到达指定网络所需的中转数，是大型局域网和广域网设置所必需的 （不在Linux内核中使用。）
-* Ref：路由项引用次数 （不在Linux内核中使用。）
-* Use：此路由项被路由软件查找的次数
-* Iface：网卡名字，表示数据包会从哪个网卡上发出。
-
-### linux路由的种类
-
-主机路由：路由表中指向单个 IP 地址或主机名的路由记录，其 Flags 字段为 H。以下面的这条规则为例，说明这条路由规则只服务于发送到 10.0.0.10 的数据包。
-
-```
-Kernel IP routing table
-Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
-10.0.0.10       10.139.128.1    255.255.255.255 UGH   0      0        0 eth0
-```
-
-网络路由，主机可以到达的网络。如示例中目的IP的网络号为 9.0.0.0 都要转发到 21.6.180.1。
-
-```
-Kernel IP routing table
-Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
-9.0.0.0         21.6.180.1      255.0.0.0       UG    0      0        0 eth1
-```
-默认路由，当目标主机的 IP 地址或网络不在路由表中时，数据包就被发送到默认路由（默认网关）上。默认路由的 Destination 是 default 或 0.0.0.0。
-
-```
-Kernel IP routing table
-Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
-0.0.0.0         21.6.180.1      0.0.0.0         UG    0      0        0 eth1
-```
-
-### 路由表的配置
-
-**静态路由**
-
-​静态路由​​无协议开销​​，不会占用带宽和计算资源。但需要管理员​手动配置​​无自动更新机制。使用于​​简单稳定的小型网络或固定路径。
-
-**动态路由**
-
-​动态路由的优点是可以​自动学习​​，路由器通过协议交换路由信息，实时更新路由表。​自适应拓扑​​，自动选择最优路径，支持故障切换。
-
-​​协议分类​​：
-​​内部网关协议（IGP）​​：用于同一自治系统内部，如：​RIP​​、​OSPF​​。
-​​外部网关协议（EGP）​​：用于不同AS间，如 ​​BGP​​。
-
-### 路由涉及的内核函数
-
-
-## 邻居表
-邻居表维护 IP 地址与 MAC 地址的映射（IPv4 用 ARP，IPv6 用 NDP）。
-
-![alt text](../image/邻居表.png)
-
-* Address​​：目标设备的 ​​IPv4 或 IPv6 地址
-* HWtype：网络接口的​​硬件类型，图中为
-* HWaddress：目标设备的 ​​MAC 地址​​即物理地址。
-* Flags
-  * C	​​Complete​​	条目有效且已确认（收到过ARP响应）
-  * M	​​Manual​​	静态配置（手动 arp -s 绑定）
-  * P	​​Publish​​	本机可响应此IP的ARP请求（代理ARP）
-  * S	​​Stale​​	条目可能失效（需重新验证）
-  * R	​​Router​​	目标是一台路由器（IPv6 NDP专用）
-  * D	​​Dynamic​​	动态学习（非静态）
-
-Mask：表示子网掩码，仅在某些系统​​中显示，这里在 Linux 上就没有显示
-Iface：网卡名字，表示数据包会从哪个网卡上发出。
-
-### 邻居表的配置
-
-邻居表中的表项可以通过静态的配置或者动态的学习。
-
-**静态配置**
-
-静态配置管理员可以手动添加ARP条目。
-
-```sh
-sudo arp -s 192.168.1.200 00:1a:2b:3c:4d:02
-```
-静态条目的特点​​是​永久有效​​：除非手动删除或重启网络服务，​Flags 为 M​。
-**动态学习**
-
-当主机需要与目标IP通信但不知道其MAC地址时，会触发ARP协议自动学习。
-
-当主机A需要和B进行通信时，如果但ARP表中无主机B的MAC地址。主机A会发送 ​ARP 请求广播包。​当​交换机收到广播帧后，会将其​​泛洪​到除接收端口外的所有端口。主机 B 收到广播后，回复 ​ARP 响应包​。其他主机则会将这个包丢弃。当主机 A 收到主机 B 的响应消息会 MAC。如果主机 A 和主机 B 不在一个子网下那么学到的则是网关的 MAC 地址。
-
-​动态学习的特点
-* Flags C 表示动态学习（Complete）。
-* ​​老化机制​​：条目默认保留 ​​15-30分钟​​（可配置），超时后删除。
-* ​广播风暴控制​​：ARP请求会广播到整个局域网，但频率有限制。
-
-### 内核函数
-
-## Netfilter
+# Netfilter
 
 Netfilter 表​​ 是 Linux 内核中用于实现​防火墙和​网络地址转换的核心机制，它通过一系列规则表和链来控制数据包的流动。这里会用 iptable 命令来进行操作。
 
-### Netfilter 中的表
+## Netfilter 中的表
 
-iptables 使用 table 来组织规则，根据不同的作用，将规则分为不同 table。例如，如果规则是处理网络地址转换的，那会放到 nat table，如果是判断是否允许包继续向前，那可能会放到 filter table。
+iptables 使用 table 来组织规则，根据不同的作用，将规则分为不同 table。例如，如果规则是处理网络地址转换的，那会放到 nat table，如果是判断是否允许包继续向前，那可能会放到 filter table。当数据包流经多个表时，会按照优先级进行处理。处理的优先级如下：
 
-在 Netfilter 有以下的表：
+​​raw → mangle → nat → filter → security​
 
 **1.filter table：** 
 
@@ -157,33 +49,65 @@ raw table 定义的功能非常有限，其唯一目的就是提供一个让包�
 打 SELinux 标记
 security table 的作用是给包打上 SELinux 标记，以此影响 SELinux 或其他可以解读 SELinux 安全上下文的系统处理包的行为。这些标记可以基于单个包，也可以基于连接。
 
-表中字段的含义：
+### 表中字段的含义**
 
-target	DNAT	对数据包进行目标地址转换（Destination NAT）。
-prot	tcp	仅匹配 TCP 协议的数据包。
-in	eth0	数据包从 eth0 网卡进入（通常为公网接口）。
-source	0.0.0.0/0	匹配任意源 IP（即所有外部客户端）。
-destination	203.0.113.1
+**pkts：** 匹配该规则的数据包数量，统计有多少个数据包命中这条规则。
 
-### 默认的 hook 点与 chain
+**bytes：** 匹配该规则的数据包总字节数，统计命中规则的数据包的总流量大小。
+
+**target：** 规则的目标动作（即 -j 参数指定的动作），定义匹配规则的数据包应该如何处理。
+
+|目标	|含义|
+|---|---|
+|ACCEPT	|允许数据包通过|
+|DROP	|丢弃数据包（无响应）|
+|REJECT	|丢弃数据包并返回错误（如 ICMP port-unreachable）|
+|DNAT	|目标地址转换（修改目标 IP 和端口）|
+|SNAT	|源地址转换（修改源 IP 和端口）|
+|MASQUERADE	|动态 SNAT（适用于拨号网络等动态 IP 场景）|
+|LOG  |记录日志（通常发送到 syslog）|
+|RETURN	|返回上一级链（类似函数 return）|
+
+**prot：** 匹配的协议类型（tcp udp ...）​，限制规则仅对特定协议生效。
+
+**opt：** IP 包选项，匹配 IP 头的特殊标志（如分片、服务类型等）。
+
+|选项	|含义|
+|---|---|
+|df	|禁止分片（Don't Fragment）|
+|!df	|允许分片|
+|tos|	|匹配服务类型（TOS）|
+
+
+**in：** 数据包的输入网络接口（如 eth0），限制规则仅对从特定网卡进入的数据包生效。    
+
+**out：** 数据包的输出网络接口，限制规则仅对从特定网卡出去的数据包生效。
+
+**source：** 源IP，限制规则仅对特定来源的流量生效。
+
+**destination：** 目的IP，限制规则仅对发往特定目标的流量生效。
+
+## 默认的 hook 点与 chain
 
 在每个 table 内部，规则被进一步组织成 chain，内置的 chain 是由内置的 hook 触发 的。chain 基本上能决定（basically determin）规则何时被匹配。
 
 hook点：
 
-NF_IP_PRE_ROUTING: 接收到的包进入协议栈后立即触发此 hook，在进行任何路由判断之前
-NF_IP_LOCAL_IN: 接收到的包经过路由判断，如果目的是本机，将触发此 hook
-NF_IP_FORWARD: 接收到的包经过路由判断，如果目的是其他机器，将触发此 hook
-NF_IP_LOCAL_OUT: 本机产生的准备发送的包，在进入协议栈后立即触发此 hook
-NF_IP_POST_ROUTING: 本机产生的准备发送的包或者转发的包，在经过路由判断之后， 将触发此 hook
+* NF_IP_PRE_ROUTING: 接收到的包进入协议栈后立即触发此 hook，在进行任何路由判断之前
+* NF_IP_LOCAL_IN: 接收到的包经过路由判断，如果目的是本机，将触发此 hook
+* NF_IP_FORWARD: 接收到的包经过路由判断，如果目的是其他机器，将触发此 hook
+* NF_IP_LOCAL_OUT: 本机产生的准备发送的包，在进入协议栈后立即触发此 hook
+* NF_IP_POST_ROUTING: 本机产生的准备发送的包或者转发的包，在经过路由判断之后， 将触发此 hook
 
 内置的 chain 名字和 netfilter hook 名字是一一对应的：
 
-PREROUTING: 由 NF_IP_PRE_ROUTING hook 触发
-INPUT: 由 NF_IP_LOCAL_IN hook 触发
-FORWARD: 由 NF_IP_FORWARD hook 触发
-OUTPUT: 由 NF_IP_LOCAL_OUT hook 触发
-POSTROUTING: 由 NF_IP_POST_ROUTING hook 触发
+* PREROUTING: 由 NF_IP_PRE_ROUTING hook 触发
+* INPUT: 由 NF_IP_LOCAL_IN hook 触发
+* FORWARD: 由 NF_IP_FORWARD hook 触发
+* OUTPUT: 由 NF_IP_LOCAL_OUT hook 触发
+* POSTROUTING: 由 NF_IP_POST_ROUTING hook 触发
+
+![alt text](../image/netffiter的表与规则链.png)
 
 除了默认的链之外，用户也可以自己定义链。
 
@@ -195,80 +119,103 @@ iptables -A MY_CHAIN -s 192.168.1.100 -j DROP  # 添加规则
 
 这里如果将默认的链上的流量跳转到自定义的链上则不需要自己单独写内核模块规定新的 hook 点。如果想要高度定制化的效果则需要自行编写内核模块。
 
-### 触发hook的位置
+## 触发hook的位置
 
 Netfilter Hook 点被嵌入到内核网络协议栈的关键路径中，通过 NF_HOOK 宏触发。
 
+![alt text](image.png)
+
 **(1) NF_IP_PRE_ROUTING**
 
-触发位置：在 ip_rcv()（IPv4 接收入口）中调用 nf_hook。
-
-• 源码路径：net/ipv4/ip_input.c
-  int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt, struct net_device *orig_dev) {
-      return NF_HOOK(NFPROTO_IPV4, NF_INET_PRE_ROUTING, 
-                     dev_net(dev), NULL, skb, dev, NULL,
-                     ip_rcv_finish); // 路由前处理
-  }
-  
-• 作用：在路由决策前处理（如 DNAT、包过滤）。
+* 触发位置：在 ip_rcv()（IPv4 接收入口）中调用 nf_hook。
+* 作用：在路由决策前处理（如 DNAT、包过滤）。
 
 **(2) NF_IP_LOCAL_IN**
 
-• 触发位置：路由判断目的为本机后，在 ip_local_deliver() 中调用。
-
-• 源码路径：net/ipv4/ip_input.c
-  int ip_local_deliver(struct sk_buff *skb) {
-      return NF_HOOK(NFPROTO_IPV4, NF_INET_LOCAL_IN,
-                     dev_net(skb->dev), NULL, skb, skb->dev, NULL,
-                     ip_local_deliver_finish); // 本机接收处理
-  }
-  
-• 作用：处理目标为本机的包（如防火墙规则）。
+* 触发位置：路由判断目的为本机后，在 ip_local_deliver() 中调用。
+* 作用：处理目标为本机的包（如防火墙规则）。
 
 **(3) NF_IP_FORWARD**
 
-• 触发位置：路由判断为转发后，在 ip_forward() 中调用。
-
-• 源码路径：net/ipv4/ip_forward.c
-  int ip_forward(struct sk_buff *skb) {
-      return NF_HOOK(NFPROTO_IPV4, NF_INET_FORWARD,
-                     dev_net(skb->dev), NULL, skb, skb->dev, NULL,
-                     ip_forward_finish); // 转发处理
-  }
-  
-• 作用：处理需要转发的包（如 FORWARD 链规则）。
+* 触发位置：路由判断为转发后，在 ip_forward() 中调用。
+* 作用：处理需要转发的包（如 FORWARD 链规则）。
 
 **(4) NF_IP_LOCAL_OUT**
 
-• 触发位置：本机发出的包在 __ip_local_out() 中调用。
-
-• 源码路径：net/ipv4/ip_output.c
-  int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb) {
-      return NF_HOOK(NFPROTO_IPV4, NF_INET_LOCAL_OUT,
-                     net, sk, skb, NULL, skb->dev,
-                     dst_output); // 本机发送处理
-  }
+* 触发位置：本机发出的包在 __ip_local_out() 中调用。
   
-• 作用：处理本机生成的包（如 OUTPUT 链规则）。
+* 作用：处理本机生成的包（如 OUTPUT 链规则）。
 
 **(5) NF_IP_POST_ROUTING**
 
-• 触发位置：在 ip_output() 或 ip_finish_output() 中调用。
+* 触发位置：在 ip_output() 或 ip_finish_output() 中调用。
 
-• 源码路径：net/ipv4/ip_output.c
-  int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb) {
-      return NF_HOOK(NFPROTO_IPV4, NF_INET_POST_ROUTING,
-                     net, sk, skb, NULL, skb->dev,
-                     ip_finish_output); // 发送前最后处理
-  }
-  
-• 作用：处理即将发出的包（如 SNAT、MASQUERADE）。
+* 作用：处理即将发出的包（如 SNAT、MASQUERADE）。
 
-Hook 优先级与处理顺序
+## Netfilter 的底层实现
 
-Netfilter 模块通过 nf_hook_ops 结构体注册处理函数，并指定优先级。内核通过链表管理同一 Hook 点的多个处理函数，按优先级排序执行。
+### Netfilter 中相关的结构体
 
-(1) 注册示例（内核模块）
+**struct nf_hook_ops**
+
+nf_hook_ops 用于定义一个钩子操作。并在其中指定了这个钩子的优先级和属于的协议族等等。
+
+```c
+struct nf_hook_ops {
+    struct list_head list;       // 链表节点
+    nf_hookfn *hook;             // 处理函数
+    int priority;                // 优先级
+    unsigned int hooknum;        // Hook 点（如 NF_INET_PRE_ROUTING）
+    u_int8_t pf;                // 协议族（如 NFPROTO_IPV4）
+};
+```
+
+**nf_hookfn**
+
+nf_hookfn 是一个函数指针类型，这里用来指向行为链的回调函数
+
+```c
+typedef unsigned int nf_hookfn(void *priv,
+			       struct sk_buff *skb,
+			       const struct nf_hook_state *state);
+```
+
+### 注册表的处理函数
+
+#### 分配 nf_hook_ops 结构
+
+nat 表直接使用静态数组进行分配：
+
+```c
+static const struct nf_hook_ops nf_nat_ipv4_ops[] = {
+	{
+		.hook		= ipt_do_table,
+		.pf		= NFPROTO_IPV4,
+		.hooknum	= NF_INET_PRE_ROUTING,
+		.priority	= NF_IP_PRI_NAT_DST,
+	},
+	{
+		.hook		= ipt_do_table,
+		.pf		= NFPROTO_IPV4,
+		.hooknum	= NF_INET_POST_ROUTING,
+		.priority	= NF_IP_PRI_NAT_SRC,
+	},
+	{
+		.hook		= ipt_do_table,
+		.pf		= NFPROTO_IPV4,
+		.hooknum	= NF_INET_LOCAL_OUT,
+		.priority	= NF_IP_PRI_NAT_DST,
+	},
+	{
+		.hook		= ipt_do_table,
+		.pf		= NFPROTO_IPV4,
+		.hooknum	= NF_INET_LOCAL_IN,
+		.priority	= NF_IP_PRI_NAT_SRC,
+	},
+};
+```
+
+其他的表则是通过 xt_hook_ops_alloc 函数对 nf_hook_ops 进行分配：
 
 ![](../image/iptable注册hook.png)
 
@@ -304,83 +251,29 @@ xt_hook_ops_alloc(const struct xt_table *table, nf_hookfn *fn)
 EXPORT_SYMBOL_GPL(xt_hook_ops_alloc);
 ```
 
-static const struct nf_hook_ops nf_nat_ipv4_ops[] = {
-	{
-		.hook		= ipt_do_table,
-		.pf		= NFPROTO_IPV4,
-		.hooknum	= NF_INET_PRE_ROUTING,
-		.priority	= NF_IP_PRI_NAT_DST,
-	},
-	{
-		.hook		= ipt_do_table,
-		.pf		= NFPROTO_IPV4,
-		.hooknum	= NF_INET_POST_ROUTING,
-		.priority	= NF_IP_PRI_NAT_SRC,
-	},
-	{
-		.hook		= ipt_do_table,
-		.pf		= NFPROTO_IPV4,
-		.hooknum	= NF_INET_LOCAL_OUT,
-		.priority	= NF_IP_PRI_NAT_DST,
-	},
-	{
-		.hook		= ipt_do_table,
-		.pf		= NFPROTO_IPV4,
-		.hooknum	= NF_INET_LOCAL_IN,
-		.priority	= NF_IP_PRI_NAT_SRC,
-	},
-};
+这里指定的处理函数都是 ipt_do_table。
 
-// 注册 Hook
+#### 注册
+
 ipt_register_table nf_register_net_hooks nf_register_net_hook
 nf_register_net_hook(net, &my_hook_ops);
 
-(2) 内核预定义优先级
+最终这些 nf_hook_ops 会被记录在一个全局变量
 
-优先级定义在 include/uapi/linux/netfilter_ipv4.h：
-enum nf_ip_hook_priorities {
-    NF_IP_PRI_FIRST = INT_MIN,
-    NF_IP_PRI_CONNTRACK = -200,   // conntrack 模块
-    NF_IP_PRI_MANGLE = -150,      // mangle 表
-    NF_IP_PRI_NAT_DST = -100,     // DNAT
-    NF_IP_PRI_FILTER = 0,         // filter 表
-    NF_IP_PRI_NAT_SRC = 100,      // SNAT
-    NF_IP_PRI_LAST = INT_MAX,
-};
-
-
-(3) 执行逻辑
+### 执行逻辑
 
 当 NF_HOOK 被触发时，内核遍历该 Hook 点的处理函数链表：
+
 1. 按优先级从高到低（数值从小到大）依次调用。
 2. 每个处理函数返回 NF_DROP、NF_ACCEPT、NF_STOLEN 等结果。
 3. 若返回 NF_DROP，则终止处理并丢弃包；若 NF_ACCEPT，则继续下一个处理函数。
 
-关键数据结构与函数：
+函数调用链：
 
-(1) struct nf_hook_ops
+NF_HOOK -> nf_hook -> nf_hook_slow -> nf_hook_entry_hookfn -> entry->hook（ipt_do_table）
 
-struct nf_hook_ops {
-    struct list_head list;       // 链表节点
-    nf_hookfn *hook;             // 处理函数
-    int priority;                // 优先级
-    unsigned int hooknum;        // Hook 点（如 NF_INET_PRE_ROUTING）
-    u_int8_t pf;                // 协议族（如 NFPROTO_IPV4）
-};
+#### NF_HOOK 
 
-
-(2) nf_hookfn 函数原型
-
-unsigned int my_hook_function(
-    void *priv,                  // 私有数据
-    struct sk_buff *skb,         // 数据包
-    const struct nf_hook_state *state // Hook 状态（设备、协议等）
-);
-
-
-(3) NF_HOOK 宏展开
-
-NF_HOOK nf_hook nf_hook_slow nf_hook_entry_hookfn entry->hook（ipt_do_table）
 ```c
 // 定义一个内联函数 NF_HOOK，用于调用 netfilter 钩子
 static inline int
@@ -399,6 +292,10 @@ NF_HOOK(uint8_t pf, unsigned int hook, struct net *net, struct sock *sk, struct 
 	return ret;
 }
 ```
+
+#### nf_hook
+
+在 nf_hook 这里会检查钩子是否有效。对于有效的钩子函数列表，这里会获取协议的钩子条目，并调用 nf_hook_slow 对钩子进行处理。
 
 ```c
 static inline int nf_hook(u_int8_t pf, unsigned int hook, struct net *net,
@@ -463,6 +360,17 @@ static inline int nf_hook(u_int8_t pf, unsigned int hook, struct net *net,
 	return ret;
 }
 ```
+#### nf_hook_slow
+
+在 nf_hook_slow 中会按照表的优先级依次注册的钩子函数。
+
+每个钩子函数返回一个判决（verdict），通过 verdict & NF_VERDICT_MASK 提取判决类型。根据判决类型，代码会采取不同的操作：
+
+* NF_ACCEPT：继续执行下一个钩子。
+* NF_DROP：丢弃数据包并返回错误。
+* NF_QUEUE：将数据包放入队列，等待用户空间处理。
+* NF_STOLEN：数据包被“偷走”，不再继续处理。
+* 其他未知判决：发出警告并返回。
 
 ```c
 int nf_hook_slow(struct sk_buff *skb, struct nf_hook_state *state,
@@ -507,6 +415,34 @@ int nf_hook_slow(struct sk_buff *skb, struct nf_hook_state *state,
 	return 1;
 }
 ```
+
+#### ipt_do_table。
+
+最终的处理函数为 ipt_do_table 。在 ipt_do_table 中会对行为链进行规则的匹配即对 target 的配置进行匹配。
+
+这里对 target 的处理分为两类。
+
+**标准目标**
+
+这里标准目标包含等等 ACCEPT、DROP、RETURN。其 target 字段为 NULL（即 t->u.kernel.target->target == NULL）。
+
+在这里 verdict 是负数，表示这是预定义的判决。
+
+|verdict 值|	宏定义|	含义|
+|---|---|---|
+|-NF_ACCEPT - 1|	XT_RETURN|	从自定义链返回到调用链（类似函数返回）。|
+|-NF_DROP - 1|	XT_DROP|	丢弃数据包。|
+|-NF_QUEUE - 1|	XT_QUEUE|	将数据包发送到用户空间（配合 libnetfilter_queue）。|
+|-NF_STOLEN - 1|	XT_STOLEN|	告知内核“偷取”数据包（由 Target 接管，协议栈不再处理）。|
+|-NF_REPEAT - 1|	XT_REPEAT|	重新执行当前钩子函数（极少使用）。|
+
+如果 verdict 为正数，则表示跳转到规则表中的另一个规则。这里利用这一点来实现自定义链。
+
+**扩展目标**
+
+扩展目标包含DNAT、SNAT、LOG等等。对于扩展目标需要自己实现规则的处理函数。
+
+verdict = t->u.kernel.target->target(skb, &acpar);
 
 ```c
 unsigned int
@@ -648,9 +584,140 @@ ipt_do_table(void *priv,
 }
 ```
 
-![alt text](image.png)
+## target
 
-​​路由表​​：struct fib_table (在 net/ipv4/fib_frontend.c)
-​​邻居表​​：struct neigh_table (在 net/core/neighbour.c)
-​​Netfilter​​：struct nf_table (在 net/netfilter/core.c)
-​​连接跟踪​​：struct nf_conn (在 net/netfilter/nf_conntrack_core.c)
+### 与target相关的结构体
+
+struct xt_target 用于定义和管理 ​​iptables/nftables 规则中的 target。通过函数指针指定如何处理匹配规则的数据包。内核通过该结构体将目标扩展注为钩子，供 iptables/nftables 调用。
+
+```c
+struct xt_target {
+	struct list_head list;
+
+	// 扩展名称
+	const char name[XT_EXTENSION_MAXNAMELEN];
+	// 修订版本号
+	u_int8_t revision;
+
+	/* 返回判决结果。参数顺序自 2.6.9 起发生变化，
+	   因为现在必须处理非线性 skbs，使用 skb_copy_bits 和 skb_ip_make_writable。 */
+	unsigned int (*target)(struct sk_buff *skb,
+				   const struct xt_action_param *);
+	/* 当用户尝试插入此类型的条目时调用：
+	   hook_mask 是可以调用的钩子的位掩码。 */
+	/* 成功时返回 0，否则返回错误代码 (-Exxxx)。 */
+	int (*checkentry)(const struct xt_tgchk_param *);
+	// 当此类型的条目被删除时调用。
+	void (*destroy)(const struct xt_tgdtor_param *);
+#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
+	/* 当用户空间对齐与内核空间对齐不同时调用 */
+	void (*compat_from_user)(void *dst, const void *src);
+	int (*compat_to_user)(void __user *dst, const void *src);
+#endif
+	/* 如果是模块，请将此设置为 THIS_MODULE，否则为 NULL */
+	struct module *me;
+	// 表名
+	const char *table;
+	// 目标扩展的大小
+	unsigned int targetsize;
+	// 用户空间数据的大小
+	unsigned int usersize;
+#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
+	// 兼容模式下的大小
+	unsigned int compatsize;
+#endif
+	// 可用的钩子
+	unsigned int hooks;
+	// 协议
+	unsigned short proto;
+	// 地址/协议族
+	unsigned short family;
+};
+```
+
+struct xt_entry_target - 表示netfilter框架中的目标条目结构
+
+此结构用于定义netfilter规则中的目标信息。它包含用户空间和内核空间用的不同字段，以及目标数据的存储。
+
+```c
+struct xt_entry_target {
+	union {
+		struct {
+			__u16 target_size;//目标结构的大小。
+
+			/* Used by userspace */
+			char name[XT_EXTENSION_MAXNAMELEN];//目标结构的名称
+			__u8 revision;//目标的修订版本。
+		} user;//对于用户态
+		struct {
+			__u16 target_size;//目标结构的大小。
+
+			/* Used inside the kernel */
+			struct xt_target *target;//指向内核中目标的指针。
+		} kernel;
+
+		/* Total length */
+		__u16 target_size;
+	} u;
+
+	unsigned char data[0];
+};
+```
+
+xt_standard_target继承自 xt_entry_target ，在此基础上增加了 verdict 通常用于定义标准目标。
+
+```c
+struct xt_standard_target {
+	struct xt_entry_target target;
+	int verdict;
+};
+```
+
+### 定义标准的目标结构
+
+下面这段代码用于定义 iptable 中的标准目标
+
+```c
+/* 标准条目结构体 */
+struct ipt_standard {
+	struct ipt_entry entry; // IP 表条目
+	struct xt_standard_target target; // 标准目标
+};
+
+/* 错误条目结构体 */
+struct ipt_error {
+	struct ipt_entry entry; // IP 表条目
+	struct xt_error_target target; // 错误目标
+};
+
+/* 初始化 IP 表条目宏 */
+#define IPT_ENTRY_INIT(__size)						       \
+{									       \
+	.target_offset	= sizeof(struct ipt_entry),			       /* 目标偏移量 */ \
+	.next_offset	= (__size),					       /* 下一个条目的偏移量 */ \
+}
+
+/* 初始化标准条目宏 */
+#define IPT_STANDARD_INIT(__verdict)					       \
+{									       \
+	.entry		= IPT_ENTRY_INIT(sizeof(struct ipt_standard)),	       /* 初始化条目 */ \
+	.target		= XT_TARGET_INIT(XT_STANDARD_TARGET,		       /* 初始化标准目标 */ \
+					 sizeof(struct xt_standard_target)),   \
+	.target.verdict	= -(__verdict) - 1,				       /* 设置判决值 */ \
+}
+
+/* 初始化错误条目宏 */
+#define IPT_ERROR_INIT							       \
+{									       \
+	.entry		= IPT_ENTRY_INIT(sizeof(struct ipt_error)),	       /* 初始化条目 */ \
+	.target		= XT_TARGET_INIT(XT_ERROR_TARGET,		       /* 初始化错误目标 */ \
+					 sizeof(struct xt_error_target)),      \
+	.target.errorname = "ERROR",					       /* 设置错误名称 */ \
+}
+```
+
+### 注册扩展 
+
+xt_register_targets -> xt_register_target
+
+以 NAT 为例，在 xt_nat_target_reg 
