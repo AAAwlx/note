@@ -174,11 +174,22 @@ Wake affine 的含义是：调度器倾向于将被唤醒的任务（wakee）安
 
 #### 慢速路径
 
-find_idlest_cpu()，即慢速路径。有两种常见的情况会进入慢速路径：传入参数sd_flag为SD_BALANCE_WAKE，且EAS没有使能或者返回-1时，如果该任务不是wake affine类型，就会进入慢速路径；传入参数sd_flag为SD_BALANCE_FORK、SD_BALANCE_EXEC时，由于此时的任务负载是不可信任的，无法预测其对系统能耗的影响，也会进入慢速路径。慢速路径使用find_idlest_cpu()方法找到系统中最空闲的CPU，作为放置任务的CPU并返回。基本的搜索流程是：
+1. 唤醒类调度（WF_TTWU）且 EAS 不可用或返回 -1，且任务不是 wake affine 类型：
 
-首先确定放置的target domain（从waker的base domain向上，找到最底层配置相应sd_flag的domain），然后从target domain中找到负载最小的调度组，进而在调度组中找到负载最小的CPU。
+   wake_flags == WF_TTWU 表示这是一个典型的唤醒场景；
 
-这种选核方式对于刚创建的任务来说，算是一种相对稳妥的做法，开发者也指出，或许可以将新创建的任务放置到特殊类型的CPU上，或者通过它的父进程来推断它的负载走向，但这些启发式的方法也有可能在一些使用场景下造成其他问题。
+   如果系统启用了 EAS（Energy Aware Scheduling）调度器，并且返回了一个合适的能效核，就用它；
+
+   如果 EAS 没使能或找不到合适目标（返回 -1），并且 wakee 不是 wake affine 类型即唤醒者和被唤醒任务关系之间没有关联性，则进入慢速路径。
+
+2. WF_EXEC 或 WF_FORK：
+   当任务是由于 exec() 或 fork() 新创建的，其负载模式尚未形成，系统无法预测其运行时行为，不能依赖能耗模型；
+
+   因此采用更保守的策略——从系统范围内选最空闲的 CPU 来放置任务。
+
+在 find_idlest_cpu 从 waker 所在的 base domain 向上查找，找到第一个配置了传入 sd_flag（如 SD_BALANCE_WAKE、SD_BALANCE_EXEC、SD_BALANCE_FORK）的 sched_domain。这就是任务放置的“搜索范围”。
+
+sched_domain 是按层次划分的，每个 domain 包含多个调度组，先比较组之间的平均负载，选一个组。在目标调度组中选择最空闲 CPU，从选中的调度组中挑出一个平均负载最小的 CPU 作为执行者。
 
 #### 快速路径
 
