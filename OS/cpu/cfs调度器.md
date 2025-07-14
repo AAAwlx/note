@@ -670,7 +670,7 @@ void set_load_weight(struct task_struct *p, bool update_load)
 
 ### 任务选择
 
-![alt text](image-1.png)
+![alt text](../image/cfs任务选择.png)
 
 ## CFS存在的缺陷
 
