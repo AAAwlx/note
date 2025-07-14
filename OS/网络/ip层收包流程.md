@@ -1,23 +1,59 @@
-驱动
-软中断
-net_rx_action napi_poll __napi_poll n->poll process_backlog  __netif_receive_skb __netif_receive_skb_one_core ip_rcv 
+
+# ip 层收包流程
+
+![alt text](../image/网卡收包函数执行流.png)
+
+## ip_rcv
+
+ip_rcv 为 ip 层的入口函数。
 
 ```c
-static int __netif_receive_skb_one_core(struct sk_buff *skb, bool pfmemalloc)
+int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt,
+	   struct net_device *orig_dev)
 {
-	struct net_device *orig_dev = skb->dev;
-	struct packet_type *pt_prev = NULL;
-	int ret;
+	struct net *net = dev_net(dev);
 
-	ret = __netif_receive_skb_core(&skb, pfmemalloc, &pt_prev);
-	if (pt_prev)
-		ret = INDIRECT_CALL_INET(pt_prev->func, ipv6_rcv, ip_rcv, skb,
-					 skb->dev, pt_prev, orig_dev);
-	return ret;
+	skb = ip_rcv_core(skb, net);
+	if (skb == NULL)
+		return NET_RX_DROP;
+
+	return NF_HOOK(NFPROTO_IPV4, NF_INET_PRE_ROUTING,
+		       net, NULL, skb, dev, NULL,
+		       ip_rcv_finish);
 }
 ```
 
-ip 层处理
+在这里首先会调用函数 ip_rcv_core 进行一个对数据包进行预处理。这里主要进行以下内容。
+
+**​​(1) 数据包合法性检查​​**
+
+​​检查项​​|失败动作​​|​统计指标​​|
+|---|---|---|
+|目标地址是否为本机 (PACKET_OTHERHOST)|立即丢弃|dev_core_stats_rx_otherhost_dropped_inc
+|IP 头长度是否合法 (ihl < 5)|标记为头部错误 (inhdr_error)|IPSTATS_MIB_INHDRERRORS
+|IP 版本是否为 IPv4 (version != 4)|同上|同上|
+|校验和是否正确 (ip_fast_csum)|标记为校验和错误 (csum_error)|IPSTATS_MIB_CSUMERRORS
+|数据包长度是否匹配 (skb->len < len)|丢弃（包过小）|IPSTATS_MIB_INTRUNCATEDPKTS
+
+​​**数据包预处理​​**
+
+​​共享检查​​ (skb_share_check)确保 skb未被其他路径修改，必要时克隆一个新副本
+
+​​长度修正​​ (pskb_trim_rcsum)移除可能的填充数据，确保 skb->len == iph->tot_len
+
+​​传输层头定位​​设置 skb->transport_header = network_header + ihl*4
+
+​​控制块清理​​重置 IPCB(skb)中的临时数据（如输入接口索引 iif）
+
+**统计信息更新​​**
+​​基础统计​​IPSTATS_MIB_IN（接收字节数）、IPSTATS_MIB_NOECTPKTS（非ECN包计数）
+
+​​错误统计​​CSUMERRORS（校验和错误）、INHDRERRORS（头部错误）等
+
+
+处理完后先会调用 Netfilter 框架对 NF_INET_PRE_ROUTING
+## ip_rcv_finish 
+
 
 ip_rcv ip_rcv_finish ip_rcv_finish_core
 
