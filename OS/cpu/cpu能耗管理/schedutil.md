@@ -6,7 +6,7 @@ schedutil 是 Linux 内核中一种 ​​基于调度器实时利用率反馈�
 * ​“需要多少算力，就给多少频率”​​，避免静态频率策略的保守或激进问题。
 * 通过减少调频延迟和消除中间层（如 ondemand 的采样周期）来提升能效和性能。
 
-![alt text](../image/schedutil.png)
+![alt text](../../image/schedutil.png)
 
 schedutil 在初始化时会注册回调函数到调度器的负载跟踪模块。当调度器的负载发生变化时，就会调用回调函数。在回调函数中会检查当前 CPU 频率与 CPU 负载是否匹配，如果不匹配则需要重新调整 CPU 的频率。
 
@@ -1013,7 +1013,7 @@ iowait boost算法过程如下：
 
 在 sugov callback 函数中调用 sugov_iowait_boost 来更新该CPU的 iowait boost状态。具体更新的规则如下表所示：
 
-![alt text](../image/iowait_boots.png)
+![alt text](../../image/iowait_boots.png)
 
 ```c
 static void sugov_iowait_boost(struct sugov_cpu *sg_cpu, u64 time,

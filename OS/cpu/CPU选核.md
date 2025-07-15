@@ -193,9 +193,34 @@ sched_domain 是按层次划分的，每个 domain 包含多个调度组，先�
 
 #### 快速路径
 
-（3）select_idle_sibling()，即快速路径。传入参数sd_flag为SD_BALANCE_WAKE，但EAS又无法发挥作用时，若该任务为wake affine类型任务，调度器就会进入快速路径来选取放置的CPU，该路径在CPU的选择上，主要考虑共享cache且idle的CPU。在满足条件的情况下，优先选择任务上一次运行的CPU（prev cpu），hot cache的CPU是wake affine类型任务所青睐的。其次是唤醒任务的CPU（wake cpu），即waker所在的CPU。当该次唤醒为sync唤醒时（传入参数wake_flags为WF_SYNC），对wake cpu的idle状态判定将会放宽，比如waker为wake cpu唯一的任务，由于sync唤醒下的waker很快就进入阻塞状态，也可当做idle处理。
+当进入 select_idle_sibling()的快速路径时，调度器会按以下顺序选择 CPU：
 
-如果prev cpu或者wake cpu无法满足条件，那么调度器会尝试从它们的LLC domain中去搜索idle的CPU。
+​​(1) 优先选择 prev_cpu（任务上一次运行的 CPU）​​
+​
+​原因​​：prev_cpu可能仍然缓存了该任务的数据（hot cache），减少 cache miss。
 
-## EAS
+​​条件​​：
+1. prev_cpu必须是 ​​idle 状态​。
+2. prev_cpu必须和当前 CPU 在同一个 ​​LLC 域​​共享三级缓存。
+
+​​(2) 其次选择 wake_cpu（唤醒者所在的 CPU）​​
+
+​​原因​​：wake_cpu是唤醒者（waker）所在的 CPU，如果任务 B 被任务 A 唤醒，那么 B 在 A 的 CPU 上运行可能更高效（减少数据同步开销）。
+​
+​条件​​：wake_cpu 必须是 ​​idle 状态​​（或接近 idle）。
+
+​但是也存在​特殊情况如果本次唤醒是 ​​同步唤醒（WF_SYNC）​​，那么即使 wake_cpu 不是完全 idle，也可能被选中。
+
+例如：
+wake_cpu上只有一个任务（waker），并且 waker 即将进入阻塞状态（如调用 wait()），那么可以近似认为 wake_cpu是 idle 的。
+
+​​(3) 如果 prev_cpu和 wake_cpu都不满足条件​​
+
+调度器会从 prev_cpu或 wake_cpu的 ​​LLC domain（共享 L3 cache 的 CPU 组）​​ 中搜索一个 idle 的 CPU。
+
+​​目标​​：仍然尽量选择 ​​cache-hot 的 CPU​​，减少 cache miss。
+
+这样做的好处是可以减少 cache miss。让任务在同一个 CPU 或邻近 CPU 上运行时，可以利用​已有的 cache 数据​​，提高性能。
+
+
 
