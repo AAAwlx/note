@@ -9,6 +9,8 @@
 
 触发负载均衡的路径有三种，分别为周期性负载均衡、NOHZ负载均衡、newidle balance。 这里负载均衡采取的策略都是空闲的 CPU 在各个层级的调度域内从繁忙的 CPU 上主动拉取任务来达到调度域内的平衡。
 
+它们的本质是：当前 CPU 主动去其他 CPU 上偷任务（steal tasks），以填补自己的空闲。
+
 ![alt text](../image/周期性触发负载均衡.png)
 
 ### 周期性负载均衡
@@ -533,6 +535,7 @@ static int should_we_balance(struct lb_env *env)
     return group_balance_cpu(sg) == env->dst_cpu;
 }
 ```
+
 ### 2.寻找需要迁移任务的源调度组与源队列
 
 sched_balance_find_src_group 函数用于寻找当前调度域中需要迁移的调度组。下面是一张决策表
@@ -745,7 +748,6 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 3. 检查 LBF_NEED_BREAK 等标志并对此做出处理
 4. 错误处理
 
-
 这里在迁移时有四种状态：
 
 **LBF_NEED_BREAK**
@@ -938,6 +940,7 @@ if (idle != CPU_NEWLY_IDLE &&
 目的：避免短暂失败污染计数器，导致过度迁移
 
 **3.主动负载均衡触发**
+
 ```c
 if (need_active_balance(&env)) {
     // 获取目标运行队列锁
@@ -947,6 +950,7 @@ if (need_active_balance(&env)) {
         raw_spin_rq_unlock_irqrestore(busiest, flags);
         goto out_one_pinned;
 ```
+
 need_active_balance()：检查是否需要强制迁移
 
 条件：存在严重不平衡且常规迁移失败
@@ -964,6 +968,7 @@ if (!busiest->active_balance) {
     busiest->push_cpu = this_cpu;
     active_balance = 1;
 ```
+
 原子标记：设置active_balance标志防止重复触发
 
 目标CPU：记录待迁移的目标CPU（push_cpu）
@@ -974,18 +979,18 @@ stop_one_cpu_nowait(cpu_of(busiest),
     active_load_balance_cpu_stop, busiest,
     &busiest->active_balance_work);
 ```
-异步执行：在繁忙CPU上调度active_load_balance_cpu_stop工作队列
 
+异步执行：在繁忙CPU上调度active_load_balance_cpu_stop工作队列
 
 ## migration线程
 
-migration线程是用于进行处理主动负载均衡的一个内核线程。
+migration线程是用于进行处理主动负载均衡的一个内核线程。当前 CPU 通过 idle_balance() 发现某个目标 CPU 有任务正在运行且负载高。但是目标 CPU 的等待队列中并没有任务可以进行迁移，此时只能尝试把目标 CPU 正在运行的那个任务主动迁移过来。
 
 为什么需要主动均衡？​​
 ​
 1. ​常规均衡的局限性​​：
    * ​任务执行导致无法迁移​​：常规均衡（如 detach_tasks）只能迁移 ​​就绪态任务​​（在运行队列中等待的任务）。如果源CPU的任务 ​​正在执行​​（busiest->curr），常规均衡无法直接迁移它。例如一个CPU密集型任务长时间占用源CPU，导致调度器没有机会将其移出。
-	* ​锁竞争或延迟问题​​：常规均衡可能在分离任务时因锁冲突失败（如 rq->lock 竞争）。
+   * ​锁竞争或延迟问题​​：常规均衡可能在分离任务时因锁冲突失败（如 rq->lock 竞争）。
 2. 目标CPU闲置的浪费​​
    如果目标CPU持续空闲，而源CPU因任务卡住无法释放负载，会导致​系统吞吐量下降​​​​。
 
@@ -1001,5 +1006,3 @@ migration线程是用于进行处理主动负载均衡的一个内核线程。
 ​2. ​绕过常规限制​​：
 
 主动均衡直接操作 ​​运行中任务​​，而常规均衡只能操作就绪队列中的任务。类似于“强制驱逐”繁忙CPU的任务。
-
-

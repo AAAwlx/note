@@ -123,7 +123,7 @@ iptables -A MY_CHAIN -s 192.168.1.100 -j DROP  # 添加规则
 
 Netfilter Hook 点被嵌入到内核网络协议栈的关键路径中，通过 NF_HOOK 宏触发。
 
-![alt text](image.png)
+![alt text](../image/Netfilter的hook点.png)
 
 **(1) NF_IP_PRE_ROUTING**
 
@@ -528,7 +528,7 @@ ipt_do_table(void *priv,
 			trace_packet(state->net, skb, hook, state->in,
 					 state->out, table->name, private, e);
 #endif
-		/* 标准目标？ */
+		/* 标准目标？没有注册target回调函数的是标准目标 */
 		if (!t->u.kernel.target->target) {
 			int v;
 
@@ -720,4 +720,84 @@ struct ipt_error {
 
 xt_register_targets -> xt_register_target
 
-以 NAT 为例，在 xt_nat_target_reg 
+以 NAT 为例，在 xt_nat_target_reg 结构中会注册对于 NAT 的处理函数
+
+```c
+
+static struct xt_target xt_nat_target_reg[] __read_mostly = {
+	{
+		.name		= "SNAT",
+		.revision	= 0,
+		.checkentry	= xt_nat_checkentry_v0,
+		.destroy	= xt_nat_destroy,
+		.target		= xt_snat_target_v0,
+		.targetsize	= sizeof(struct nf_nat_ipv4_multi_range_compat),
+		.family		= NFPROTO_IPV4,
+		.table		= "nat",
+		.hooks		= (1 << NF_INET_POST_ROUTING) |
+				  (1 << NF_INET_LOCAL_IN),
+		.me		= THIS_MODULE,
+	},
+	{
+		.name		= "DNAT",
+		.revision	= 0,
+		.checkentry	= xt_nat_checkentry_v0,
+		.destroy	= xt_nat_destroy,
+		.target		= xt_dnat_target_v0,
+		.targetsize	= sizeof(struct nf_nat_ipv4_multi_range_compat),
+		.family		= NFPROTO_IPV4,
+		.table		= "nat",
+		.hooks		= (1 << NF_INET_PRE_ROUTING) |
+				  (1 << NF_INET_LOCAL_OUT),
+		.me		= THIS_MODULE,
+	},
+	{
+		.name		= "SNAT",
+		.revision	= 1,
+		.checkentry	= xt_nat_checkentry,
+		.destroy	= xt_nat_destroy,
+		.target		= xt_snat_target_v1,
+		.targetsize	= sizeof(struct nf_nat_range),
+		.table		= "nat",
+		.hooks		= (1 << NF_INET_POST_ROUTING) |
+				  (1 << NF_INET_LOCAL_IN),
+		.me		= THIS_MODULE,
+	},
+	{
+		.name		= "DNAT",
+		.revision	= 1,
+		.checkentry	= xt_nat_checkentry,
+		.destroy	= xt_nat_destroy,
+		.target		= xt_dnat_target_v1,
+		.targetsize	= sizeof(struct nf_nat_range),
+		.table		= "nat",
+		.hooks		= (1 << NF_INET_PRE_ROUTING) |
+				  (1 << NF_INET_LOCAL_OUT),
+		.me		= THIS_MODULE,
+	},
+	{
+		.name		= "SNAT",
+		.revision	= 2,
+		.checkentry	= xt_nat_checkentry,
+		.destroy	= xt_nat_destroy,
+		.target		= xt_snat_target_v2,
+		.targetsize	= sizeof(struct nf_nat_range2),
+		.table		= "nat",
+		.hooks		= (1 << NF_INET_POST_ROUTING) |
+				  (1 << NF_INET_LOCAL_IN),
+		.me		= THIS_MODULE,
+	},
+	{
+		.name		= "DNAT",
+		.revision	= 2,
+		.checkentry	= xt_nat_checkentry,
+		.destroy	= xt_nat_destroy,
+		.target		= xt_dnat_target_v2,
+		.targetsize	= sizeof(struct nf_nat_range2),
+		.table		= "nat",
+		.hooks		= (1 << NF_INET_PRE_ROUTING) |
+				  (1 << NF_INET_LOCAL_OUT),
+		.me		= THIS_MODULE,
+	},
+};
+```
