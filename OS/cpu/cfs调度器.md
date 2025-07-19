@@ -446,6 +446,12 @@ static long calc_group_shares(struct cfs_rq *cfs_rq)
 
 ![alt text](../image/初始化权重.png)
 
+| 来源   | 说明                               |
+| ---- | -------------------------------- |
+| 默认值  | 没有手动设置时使用 `NICE_0_LOAD = 1024`   |
+| 手动设置 | 来自 `cgroup v2` 的 `cpu.weight` 接口 |
+| 动态变化 | 某些场景下内核会重新计算或继承                  |
+
 ## cfs 调度类的方法
 
 在不同的调度类中都会注册自己的方法集，下面是 cfs 调度器注册的方法。

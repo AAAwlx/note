@@ -10,7 +10,7 @@
 
 最终这三个函数都会调到 select_task_rq -> select_task_rq_fair。
 
-![Alt text](cpu选核函数调用.png)
+![Alt text](../image/cpu选核函数调用.png)
 
 ## select_task_rq_fair
 
@@ -140,7 +140,7 @@ sched_domain 标志，用于表示某个调度域 (sched_domain) 的行为特性
 
 上述这些标志会影响到后续的选核方式。
 
-### 选核
+## 选核
 
 select_task_rq_fair()中涉及到三个重要的选核函数：
 
@@ -150,9 +150,11 @@ select_task_rq_fair()中涉及到三个重要的选核函数：
 
 它们分别代表任务放置过程中的三条路径。task placement的各个场景，根据不同条件，最终都会进入其中某一条路径，得到任务放置CPU并结束此次的task placement过程。
 
-#### find_energy_efficient_cpu EAS 选核路径
+### find_energy_efficient_cpu EAS 选核路径
 
 find_energy_efficient_cpu()，即EAS选核路径。当传入参数sd_flag为SD_BALANCE_WAKE，并且系统配置key值sched_energy_present（即考虑性能和功耗的均衡），调度器就会进入EAS选核路径进行CPU的查找。EAS路径在保证任务能正常运行的前提下，为任务选取使系统整体能耗最小的CPU。通常情况下，EAS总是能如愿找到符合要求的CPU，但如果当前平台不是异构系统，或者系统中存在超载（Over-utilization）的 CPU，EAS就直接返回-1。
+
+### 其他路径
 
 当EAS不能在这次调度中发挥作用时，分支的走向取决于该任务是否为wake affine类型的任务，
 
