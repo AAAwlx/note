@@ -87,6 +87,32 @@ security table 的作用是给包打上 SELinux 标记，以此影响 SELinux �
 
 **destination：** 目的IP，限制规则仅对发往特定目标的流量生效。
 
+### 内核中的表结构
+
+```c
+/* 防火墙表结构 */
+struct xt_table {
+	struct list_head list;  // 链表，用于存储所有的表
+
+	/* 有效的钩子点 */
+	unsigned int valid_hooks;
+
+	/* 表的私有数据，存储实际的规则信息 */
+	struct xt_table_info *private;
+
+	/* 用于将表注册到 netfilter 核心的钩子操作 */
+	struct nf_hook_ops *ops;
+
+	/* 如果是模块，请将此设置为 THIS_MODULE，否则为 NULL */
+	struct module *me;
+
+	u_int8_t af;		/* 地址/协议族 */
+	int priority;		/* 钩子优先级 */
+
+	/* 表的唯一名称 */
+	const char name[XT_TABLE_MAXNAMELEN];
+};
+```
 ## 默认的 hook 点与 chain
 
 在每个 table 内部，规则被进一步组织成 chain，内置的 chain 是由内置的 hook 触发 的。chain 基本上能决定（basically determin）规则何时被匹配。
@@ -258,7 +284,9 @@ EXPORT_SYMBOL_GPL(xt_hook_ops_alloc);
 ipt_register_table nf_register_net_hooks nf_register_net_hook
 nf_register_net_hook(net, &my_hook_ops);
 
-最终这些 nf_hook_ops 会被记录在一个全局变量
+最终这些会被记录在一个全局变量
+
+在初始化表结构 
 
 ### 执行逻辑
 
