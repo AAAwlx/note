@@ -41,6 +41,7 @@ $$MaxCPUcapacity\times\big(\cfrac{runingtime}{1024}\big)$$
   | -------- | ------- | ------------------- |
   | big 核    | 2.4 GHz | 1024                |
   | little 核 | 1.2 GHz | 512                 |
+  
   这意味着在同样的 runningtime 下，big 核的执行能力是 little 核的两倍。
 
 * running_time​​：任务在最近周期（1024微秒）内​​实际运行的时间​​。
