@@ -275,9 +275,9 @@ static u32 __accumulate_pelt_segments(u64 periods, u32 d1, u32 d3)
 }
 ```
 
-**计算调度组的负载**
+**更新调度组的负载**
 
-调度组的负载计算入口函数为 update_cfs_rq_load_avg 。这里的计算逻辑与计算单个任务的负载逻辑相似。
+在更新单个任务的负载时，如果该任务不再根cfs组，那么在更新完任务的负载后也会更新父调度组的load。这里的更新通过函数 update_tg_load_avg 来实现。
 
 但是这里如果存在多层级的 cfs_rq 即:
 
@@ -294,7 +294,7 @@ static u32 __accumulate_pelt_segments(u64 periods, u32 d1, u32 d3)
 
 2. 显式传播（非 tick 场景）
    
-   cfs---se层级结构有了调度实体的变化（新增或者移除），那么需要处理向上传播的负载。这里会调用 update_tg_load_avg 来实现。
+   cfs---se层级结构有了调度实体的变化（新增或者移除），那么需要处理向上传播的负载。
 
 ## 时间计算
 
