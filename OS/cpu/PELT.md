@@ -13,7 +13,6 @@ PELT（Per-Entity Load Tracking）算法​​ 是 Linux 内核调度器（CFS�
 | 不适用于节能调度 | 支持 EAS，优化功耗 |
 | 多核负载均衡不精确 | 更精准的负载数据，提升多核调度效率 |
 
-
 ## 核心公式
 
 瞬时负载（Li）：表示进程对cpu需要的程度,用于优先级敏感的负载均衡（如CFS的vruntime计算）
@@ -33,6 +32,17 @@ $$loadweight\times\big(\cfrac{runnabletime}{1024}\big)$$
 $$MaxCPUcapacity\times\big(\cfrac{runingtime}{1024}\big)$$
 
 * Max_CPU_capacity​​：CPU最大算力，归一化为1024（如手机大核最高频时capacity=1024）。
+
+  CPU capacity 原始定义：Linux 内核中，每个 CPU 会有一个 capacity 值，表示其最大计算能力，存储在 cpu_capacity_orig 或 capacity_orig_of(cpu) 中。它通常按以下方式归一化：
+  
+  将最强的 big 核设为 基准（通常为 1024）其他核的 capacity 以此为参考进行线性缩放
+  
+  | 核类型      | 原始频率    | 归一化 `capacity_orig` |
+  | -------- | ------- | ------------------- |
+  | big 核    | 2.4 GHz | 1024                |
+  | little 核 | 1.2 GHz | 512                 |
+  这意味着在同样的 runningtime 下，big 核的执行能力是 little 核的两倍。
+
 * running_time​​：任务在最近周期（1024微秒）内​​实际运行的时间​​。
 
 瞬时运行负载（RLi）：反映任务对CPU算力的需求​，用于判断CPU是否过载，触发任务迁移
