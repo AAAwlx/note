@@ -638,6 +638,98 @@ enum group_type {
 |sum_nr_running	|累加组内所有 CPU 的 rq->nr_running（运行队列中的任务数）|	统计组内​​总任务数量​|​
 |sum_h_nr_running	|累加组内所有 CPU 的 rq->cfs.h_nr_runnable（CFS 可运行任务数）|	专用于 CFS 调度类的任务计数|
 
+比较谁更busy：
+
+```c
+//函数 update_sd_pick_busiest
+// 0. 前置条件过滤
+if (sgs->sum_h_nr_running == 0)
+    return false;
+
+// 非对称 CPU 架构下：当前目标 CPU 不能有效处理该组任务 → 跳过
+if (SD_ASYM_CPUCAPACITY && sg 是 misfit 组 && 当前目标 CPU 没能力处理)
+    return false;
+
+// 1. 比较 group_type（按优先级排）
+if (sgs->group_type > busiest->group_type)
+    return true;
+else if (sgs->group_type < busiest->group_type)
+    return false;
+
+// 2. group_type 相同，按类型细分比较：
+switch (sgs->group_type) {
+case group_overloaded:
+    // 谁的 avg_load 高，谁 busy
+    return sgs->avg_load > busiest->avg_load;
+
+case group_misfit_task:
+    // 谁的 misfit task 负载大，谁 busy
+    return sgs->group_misfit_task_load > busiest->group_misfit_task_load;
+
+case group_fully_busy:
+    // avg_load 高的更忙（如果相等，非 SMT 优先）
+    if (sgs->avg_load < busiest->avg_load)
+        return false;
+    if (sgs->avg_load == busiest->avg_load &&
+        sds->busiest 是 SMT组)
+        return false;
+    break;
+
+case group_has_spare:
+    // SMT 与非SMT 优先级判断
+    if (smt_vs_nonsmt_groups(...)) {
+        if (sg 是 SMT 且只有一个任务 → 跳过)
+            return false;
+        else
+            return true;
+    }
+
+    // 空闲 CPU 越少，任务越多 → 越 busy
+    if (sgs->idle_cpus > busiest->idle_cpus)
+        return false;
+    else if (sgs->idle_cpus == busiest->idle_cpus &&
+             sgs->sum_nr_running <= busiest->sum_nr_running)
+        return false;
+    break;
+
+case group_asym_packing:
+    // 优先迁移优先级低的 CPU 上的任务
+    return sched_asym_prefer(...);
+
+case group_smt_balance:
+    // 若有空闲 CPU，按 has_spare 的逻辑判断
+    if (sgs->idle_cpus != 0 || busiest->idle_cpus != 0)
+        goto has_spare;
+    fallthrough;
+
+case group_imbalanced:
+    return false; // 默认跳过
+
+default:
+    break;
+}
+
+// 3. 非对称 CPU 架构下，源组能力强于目标 CPU，拒绝迁移
+if (SD_ASYM_CPUCAPACITY && 源组能力 > 目标 CPU 能力)
+    return false;
+
+// 最终默认接受该组为更 busy
+return true;
+```
+
+group_type 优先级（越靠下越“轻松”）
+
+| group\_type 值         | 含义               |
+| --------------------- | ---------------- |
+| `group_overloaded`    | 任务数远大于 CPU 数     |
+| `group_misfit_task`   | 任务运行在性能不匹配 CPU 上 |
+| `group_fully_busy`    | 每个 CPU 都至少有一个任务  |
+| `group_asym_packing`  | 非对称拓扑调度优先级       |
+| `group_smt_balance`   | SMT sibling 不均衡  |
+| `group_has_spare`     | 有空闲 CPU，可拉任务     |
+| `group_imbalanced`    | 平均负载不均衡          |
+| `group_other/unknown` | 默认值              |
+
 ```c
 /**
  * update_sg_lb_stats - 更新调度组的负载均衡统计信息
