@@ -472,6 +472,8 @@ out:
 |部分空闲SMT核心| SMT域中核心有忙碌线程，当前是第一个空闲SMT| SMT层均衡| 中|
 |组首选CPU| 无其他匹配条件，当前CPU是组内首选| 热插拔/隔离后的回退机制| 低|
 
+符合上述条件的 cpu 会进入负载均衡的阶段。
+
 ```c
 static int should_we_balance(struct lb_env *env)
 {
