@@ -332,7 +332,7 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu)
             if (!cpumask_test_cpu(cpu, p->cpus_ptr))  // 如果该 CPU 不在任务的可用 CPU 范围内，则跳过
                 continue;
 
-            util = cpu_util(cpu, p, cpu, 0);  // b.获取当前 CPU 的负载利用率
+            util = cpu_util(cpu, p, cpu, 0);  // 获取当前 CPU 的负载利用率，cfs_rq->avg.util_avg
             cpu_cap = capacity_of(cpu);  // 获取 CPU 的计算能力
 
             // 如果 CPU 无法满足任务的负载需求，则跳过
@@ -345,7 +345,7 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu)
                 util_max = max(rq_util_max, p_util_max);
             }
 
-            fits = util_fits_cpu(util, util_min, util_max, cpu);  // c.判断该 CPU 是否能满足任务的需求
+            fits = util_fits_cpu(util, util_min, util_max, cpu);  // 判断该 CPU 是否能满足任务的需求
             if (!fits)  // 如果不能适配，则跳过该 CPU
                 continue;
 
