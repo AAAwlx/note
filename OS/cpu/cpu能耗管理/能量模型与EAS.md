@@ -178,7 +178,66 @@ compute_energy(struct energy_env *eenv, struct perf_domain *pd,
 
 然后会调用 em_cpu_energy 函数对放置任务后需要消耗的能量值进行估算。在该函数中会根据上面的公式与 max_util 来对放置该任务后所需要的能量来进行估算。上面公式中的 Sum cpu_util 带入的就是 max_util 。
 
+```c
+/*
+ * 计算性能域(performance domain)的能量消耗
+ * @pd: 性能域的能效模型(Energy Model)指针
+ * @max_util: 性能域中最繁忙CPU的利用率
+ * @sum_util: 性能域中所有CPU利用率的和
+ * @allowed_cpu_cap: 允许的CPU最大容量(可能因热限制而降低)
+ * 返回值: 估算的性能域总能量消耗
+ */
+static inline unsigned long em_cpu_energy(struct em_perf_domain *pd,
+				unsigned long max_util, unsigned long sum_util,
+				unsigned long allowed_cpu_cap)
+{
+	struct em_perf_table *em_table;
+	struct em_perf_state *ps;
+	int i;
 
+#ifdef CONFIG_SCHED_DEBUG
+	/* 调试模式下检查RCU读锁是否已持有 */
+	WARN_ONCE(!rcu_read_lock_held(), "EM: rcu read lock needed\n");
+#endif
+
+	/* 如果没有利用率，直接返回0能量消耗 */
+	if (!sum_util)
+		return 0;
+
+	/*
+	 * 将最繁忙CPU的利用率限制到允许的CPU容量
+	 * 这是为了考虑热限制等导致的性能降低
+	 */
+	max_util = min(max_util, allowed_cpu_cap);
+
+	/*
+	 * 在能效模型中查找满足max_util要求的最低性能状态
+	 * em_table包含性能状态表
+	 */
+	em_table = rcu_dereference(pd->em_table);
+	i = em_pd_get_efficient_state(em_table->state, pd, max_util);
+	ps = &em_table->state[i];  // 获取对应的性能状态
+
+	/*
+	 * 计算并返回总能量消耗:
+	 * 能量 = 性能状态成本系数 * 总利用率
+	 * 
+	 * 其中性能状态成本系数(ps->cost)是预先计算的:
+	 * cost = (power * cpu_max_freq) / (freq * scale_cpu)
+	 * 
+	 * 这个公式的推导:
+	 * 1. 首先计算性能状态下的CPU性能(容量):
+	 *    performance = (ps->freq * scale_cpu) / cpu_max_freq
+	 * 2. 然后计算单个CPU的能量:
+	 *    cpu_nrg = (ps->power * cpu_util) / performance
+	 * 3. 将1代入2后可以简化为:
+	 *    cpu_nrg = ps->cost * cpu_util
+	 * 4. 整个性能域的能量就是所有CPU能量之和:
+	 *    pd_nrg = ps->cost * sum_util
+	 */
+	return ps->cost * sum_util;
+}
+```
 
 ## EAS
 
@@ -194,8 +253,7 @@ EAS选核的策略：
 
 2. cluster 内按能耗模型选择最优 CPU。在 cluster 内，遍历候选 CPU，使用 Energy Model（EM）计算每个可能调度方案下的总能耗。选择使得系统能耗总和最小的 CPU。
 
-3. 避免将任务堆叠到单核，适度分散。虽然任务全堆到一个 CPU 上能让其他核 idle，更省电，
-但会使该核频率提升，且 cluster 更难整体 idle。因此在选定 cluster 后，尽量在 cluster 内把任务“适度”均摊分散。
+3. 避免将任务堆叠到单核，适度分散。虽然任务全堆到一个 CPU 上能让其他核 idle，更省电，但会使该核频率提升，且 cluster 更难整体 idle。因此在选定 cluster 后，尽量在 cluster 内把任务“适度”均摊分散。
 
 4. EAS 只在异构（非对称）系统开启。只有在 SD_ASYM_CPUCAPACITY 标志存在时才启用。因为只有 big.LITTLE 这类架构下，不同核心能耗差异显著，EAS 才能发挥作用。
 
@@ -364,7 +422,7 @@ unlock:
 
 **1.确定一个sched domain**
 
-自下而上的遍历调度域，通过 sd_asym_cpucapacity 获取当前 CPU 所在的调度域，并且根据该调度域是否包含 prev_cpu，决定是否进入下一个调度域。
+自下而上的遍历性能域，通过 sd_asym_cpucapacity 获取当前 CPU 所在的性能域，并且根据该性能域是否包含 prev_cpu，决定是否进入下一个性能域。
 
 prev_cpu 表示的是任务上次运行时所在的 CPU。它是一个指向当前进程 先前所在 CPU 的标识符，即该任务在被唤醒之前的执行 CPU。
 
