@@ -60,7 +60,9 @@ $${vruntime} += \cfrac{实际执行时间\times NICELOAD}{任务权重} $$
 
 ​​任务权重​​：由任务的优先级（nice 值）决定，优先级越高（nice 值越小），权重越大（例如 nice=0 时权重=1024，nice=-5 时权重≈2048）。当两个任务运行在cpu上的时间相同时，权重越大任务的虚拟运行时间越少，更容易再次被调度上cpu,同时也能获得更多的实际cpu使用时间。
 
-在这里最终会调用到 __calc_delta 函数进行计算。
+在这里最终会调用到 __calc_delta 函数进行计算。该函数会在时钟中断，任务出队入队，任务唤醒等时刻。
+
+update_curr -> calc_delta_fair -> 
 
 ```c
 /*
@@ -241,6 +243,8 @@ struct sched_entity {
 ### struct cfs_rq
 
 cfs_rq 记录了这个调度组内的调度实例的优先级。在调度时会选取 cfs_rq 中最左边的节点上 cpu 即虚拟时间比较小的值。
+
+cfs_rq 结构中的 load 和对应的 se 结构是
 
 ![alt text](../image/cfs_rq.png)
 
