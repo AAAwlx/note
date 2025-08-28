@@ -356,9 +356,37 @@ new = d_alloc(parent, name);
 		}
 ```
 
+处理流程：
+
+```lua
+do_lookup
+   |
+   |-- 调用 d_hash? -> 错误退出
+   |
+   |-- __d_lookup (无锁缓存查找)
+   |        |-- 命中 -> need_revalidate? -> done
+   |        |-- 未命中 -> need_lookup
+   |
+   |-- need_lookup
+   |        |-- d_lookup (加锁查找)
+   |        |        |-- 未命中 -> 分配新dentry + i_op->lookup
+   |        |        |-- 命中 -> 可能 revalidate
+   |
+   |-- need_revalidate
+   |        |-- do_revalidate
+   |                 |-- NULL -> need_lookup
+   |                 |-- 错误 -> fail
+   |                 |-- OK   -> done
+   |
+   |-- done -> 设置 path 并 follow_mount
+   |
+   |-- fail -> 返回错误码
+
+```
+
 ## 如何处理目录项之下挂载了文件系统的情况
 
-在内核中使用这两个函数来处理目录项下存在挂载点的情况，将path中记录的 dirent 项转移到挂载点所对应的根目录中
+在内核中使用这两个函数来处理目录项下存在挂载点的情况，将path中记录的 dirent 项转移到挂载点所对应的根目录中。
 
 ```c
 static int __follow_mount(struct path *path)
@@ -377,7 +405,18 @@ static int __follow_mount(struct path *path)
     }
     return res;
 }
+```
 
+在上述函数中会调用来判断这个目录下面有没有挂载其他的文件系统，这里会用到 dentry 中的
+
+```c
+static inline int d_mountpoint(struct dentry *dentry)
+{
+    return dentry->d_mounted;
+}
+```
+
+```c
 static void follow_mount(struct path *path)
 {
     // 循环检查路径上的目录项是否为挂载点
