@@ -691,6 +691,31 @@ out_err_no_srcu:
 
 在操作系统启动期间，detect_hypervisor_vendor 和 init_hypervisor_platform 会被调用。这两个函数用来检测当前的 kernel 是否运行在虚拟化平台上。
 
+```text
+物理机启动                    虚拟机启动
+    ↓                           ↓
+kernel_start              kernel_start
+    ↓                           ↓
+setup_arch                setup_arch
+    ↓                           ↓
+init_hypervisor_platform  init_hypervisor_platform
+    ↓                           ↓
+detect_hypervisor_vendor  detect_hypervisor_vendor
+    ↓                           ↓
+遍历 hypervisors[]         遍历 hypervisors[]
+    ↓                           ↓
+    │                           │
+    ├─ KVM detect() → X         ├─ KVM detect() → ✓
+    ├─ Xen detect() → X         ├─ Xen detect() → X
+    ├─ VMware detect() → X      ├─ VMware detect() → X
+    ├─ HyperV detect() → X      └─ ...
+    └─ ...                      │
+    ↓                           ↓
+按物理机运行                 按虚拟机优化
+```
+
+函数调用链路：
+
 ```c
 kernel_start setup_arch init_hypervisor_platform detect_hypervisor_vendor
 ```
