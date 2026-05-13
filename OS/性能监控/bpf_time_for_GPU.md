@@ -1,44 +1,86 @@
 # 整体架构
 
-```text
-┌─────────────────────────────────────────────────────────────────┐
-│                        应用层                      │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
-│  │ Examples │  │ Benchmark│  │  Tools   │  │    Daemon    │  │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────────┘  │
-├─────────────────────────────────────────────────────────────────┤
-│                      运行时核心层                     │
-│  ┌────────────────────────────────────────────────────────┐    │
-│  │                    Runtime (运行时)                     │    │
-│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────────┐  │    │
-│  │  │ Handler │ │ BPF Map │ │ Syscall │ │   Agent     │  │    │
-│  │  │ Manager │ │         │ │ Server  │ │             │  │    │
-│  │  └─────────┘ └─────────┘ └─────────┘ └─────────────┘  │    │
-│  └────────────────────────────────────────────────────────┘    │
-├─────────────────────────────────────────────────────────────────┤
-│                      附加层                       │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐     │
-│  │  Base    │ │  Frida   │ │ Syscall  │ │    NV/GPU    │     │
-│  │  Attach  │ │  Uprobe  │ │  Trace   │ │    Attach    │     │
-│  └──────────┘ └──────────┘ └──────────┘ └──────────────┘     │
-├─────────────────────────────────────────────────────────────────┤
-│                      虚拟机层                         │
-│  ┌────────────────────────────────────────────────────────┐    │
-│  │                      VM (虚拟机)                        │    │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────────────────┐   │    │
-│  │  │ VM Core  │ │ LLVM JIT │ │   Compat Layer       │   │    │
-│  │  └──────────┘ └──────────┘ │ (ubpf/llvm/compat)   │   │    │
-│  │                              └──────────────────────┘   │    │
-│  └────────────────────────────────────────────────────────┘    │
-├─────────────────────────────────────────────────────────────────┤
-│                      验证层                       │
-│                     bpftime-verifier                          │
-├─────────────────────────────────────────────────────────────────┤
-│                      第三方依赖层                  │
-│  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌────────┐ ┌─────┐    │
-│  │ spdlog│ |ubpf │ |Catch2│ |Frida │ | libbpf │ |LLVM │    │
-│  └──────┘ └──────┘ └──────┘ └──────┘ └────────┘ └─────┘    │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    %% 定义样式类
+    classDef layer fill:#e1f5ff,stroke:#0078d4,stroke-width:2px,color:#004578
+    classDef component fill:#f9f9f9,stroke:#666,stroke-width:1px,color:#333
+    classDef subcomponent fill:#fff,stroke:#999,stroke-width:1px,color:#555
+    classDef verifier fill:#ffe6cc,stroke:#d6b656,stroke-width:2px,color:#664d00
+    classDef dependency fill:#e6f3ff,stroke:#6699cc,stroke-width:1px,color:#336699
+
+    %% 应用层
+    subgraph ApplicationLayer ["应用层"]
+        direction TB
+        Examples["Examples"]:::component
+        Benchmark["Benchmark"]:::component
+        Tools["Tools"]:::component
+        Daemon["Daemon"]:::component
+    end
+    class ApplicationLayer layer
+
+    %% 运行时核心层
+    subgraph RuntimeCoreLayer ["运行时核心层"]
+        direction TB
+        subgraph Runtime ["Runtime (运行时)"]
+            direction TB
+            HandlerManager["Handler Manager"]:::subcomponent
+            BPFMap["BPF Map"]:::subcomponent
+            SyscallServer["Syscall Server"]:::subcomponent
+            Agent["Agent"]:::subcomponent
+        end
+        class Runtime layer
+    end
+    class RuntimeCoreLayer layer
+
+    %% 附加层
+    subgraph AdditionalLayer ["附加层"]
+        direction TB
+        BaseAttach["Base Attach"]:::component
+        FridaUprobe["Frida Uprobe"]:::component
+        SyscallTrace["Syscall Trace"]:::component
+        NVGPUAttach["NV/GPU Attach"]:::component
+    end
+    class AdditionalLayer layer
+
+    %% 虚拟机层
+    subgraph VMLayer ["虚拟机层"]
+        direction TB
+        subgraph VM ["VM (虚拟机)"]
+            direction TB
+            VMCore["VM Core"]:::subcomponent
+            LLVMJIT["LLVM JIT"]:::subcomponent
+            CompatLayer["Compat Layer<br/>(ubpf/llvm/compat)"]:::subcomponent
+        end
+        class VM layer
+    end
+    class VMLayer layer
+
+    %% 验证层
+    subgraph VerifierLayer ["验证层"]
+        direction TB
+        BpftimeVerifier["bpftime-verifier"]:::verifier
+    end
+    class VerifierLayer verifier
+
+    %% 第三方依赖层
+    subgraph DependencyLayer ["第三方依赖层"]
+        direction TB
+        spdlog["spdlog"]:::dependency
+        ubpf["ubpf"]:::dependency
+        Catch2["Catch2"]:::dependency
+        Frida["Frida"]:::dependency
+        libbpf["libbpf"]:::dependency
+        LLVM["LLVM"]:::dependency
+    end
+    class DependencyLayer layer
+
+    %% 层级关系连接
+    ApplicationLayer --> RuntimeCoreLayer
+    RuntimeCoreLayer --> AdditionalLayer
+    AdditionalLayer --> VMLayer
+    VMLayer --> VerifierLayer
+    VerifierLayer --> DependencyLayer
 ```
 
 目录树结构与文件说明:
@@ -563,35 +605,29 @@ Pass = 对代码的一次遍历和转换
 
 执行时序图：
 
-```text
-用户代码                bpftime                     CUDA/GPU
-   │                       │                           │
-   │ bpftime load          │                           │
-   │---------------------->│                           │
-   │                       │                           │
-   │ cudaLaunchKernel()    │                           │
-   │---------------------->│                           │
-   │                       │ Hook: 拦截启动            │
-   │                       │-------------------------->│
-   │                       │                           │
-   │                       │ 1. 提取 PTX               │
-   │                       │ 2. PTX Pass 注入 eBPF     │
-   │                       │ 3. 编译为 cubin           │
-   │                       │ 4. 加载修改后的 kernel    │
-   │                       │                           │
-   │                       │<--------------------------│
-   │                       │                           │
-   │                       │ GPU 执行 kernel           │
-   │       ┌───────────────┼──────────────────────────>│
-   │       │               │ 1. 触发 eBPF 探针         │
-   │       │               │ 2. 读取/写入 GPU Map      │
-   │       │               │ 3. 写入 ringbuf (可选)    │
-   │       │               │                           │
-   │       │               │<--------------------------│
-   │       │               │                           │
-   │       │ 读取 GPU Map  │                           │
-   │       │<--------------│                           │
-   │                       │                           │
+```mermaid
+sequenceDiagram
+    participant 用户代码
+    participant bpftime
+    participant CUDA/GPU
+
+    %% 初始化阶段
+    用户代码->>bpftime: bpftime load
+    用户代码->>bpftime: cudaLaunchKernel()
+
+    %% Hook与Kernel修改阶段
+    bpftime->>CUDA/GPU: Hook: 拦截启动
+    Note right of bpftime: 1. 提取 PTX<br/>2. PTX Pass 注入 eBPF<br/>3. 编译为 cubin<br/>4. 加载修改后的 kernel
+    CUDA/GPU-->>bpftime: 返回加载完成
+
+    %% GPU执行阶段
+    bpftime->>CUDA/GPU: GPU 执行 kernel
+    Note right of CUDA/GPU: 1. 触发 eBPF 探针<br/>2. 读取/写入 GPU Map<br/>3. 写入 ringbuf（可选）
+    CUDA/GPU-->>bpftime: 执行完成，数据写入Map/ringbuf
+
+    %% 用户读取结果
+    用户代码->>bpftime: 读取 GPU Map
+    bpftime-->>用户代码: 返回Map中的数据
 ```
 
 
