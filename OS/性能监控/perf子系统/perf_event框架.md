@@ -683,9 +683,319 @@ perf record -e kprobe:do_sys_open -a
 perf record -e uprobe:myapp:my_function ./myapp
 ```
 
-## 关键调用流程
+## PMU初始化
 
-### 注册一个PMU
+### 系统启动阶段初始化
+
+```text
+内核启动
+    │
+    ├─ early_initcall(init_hw_perf_events)         [arch/x86/events/core.c:2200]
+    │   │
+    │   └─ init_hw_perf_events()                   [core.c:2054]
+    │       │
+    │       ├─ 根据CPU供应商选择初始化函数
+    │       │   │
+    │       │   ├─ [Intel] intel_pmu_init()        [intel/core.c:5919]
+    │       │   │   │
+    │       │   │   ├─ 检查 ARCH_PERFMON 特性
+    │       │   │   │   cpuid(10, &eax, &ebx, &fixed_mask, &edx)
+    │       │   │   │
+    │       │   │   ├─ 读取PMU版本和能力
+    │       │   │   │   x86_pmu.version = eax.split.version_id
+    │       │   │   │   x86_pmu.num_counters = eax.split.num_counters
+    │       │   │   │   x86_pmu.cntval_bits = eax.split.bit_width
+    │       │   │   │   x86_pmu.cntval_mask = (1ULL << bit_width) - 1
+    │       │   │   │
+    │       │   │   ├─ 读取固定计数器数量
+    │       │   │   │   if (version > 1)
+    │       │   │   │       x86_pmu.num_counters_fixed = edx.split.num_counters_fixed
+    │       │   │   │
+    │       │   │   ├─ 读取性能能力寄存器
+    │       │   │   │   rdmsrl(MSR_IA32_PERF_CAPABILITIES, capabilities)
+    │       │   │   │   x86_pmu.intel_cap.capabilities = capabilities
+    │       │   │   │
+    │       │   │   ├─ 根据CPU型号设置特定参数
+    │       │   │   │   switch (x86_model):
+    │       │   │   │     case NEHALEM: nehalem_hw_cache_event_ids
+    │       │   │   │     case SANDYBRIDGE: snb_hw_cache_event_ids
+    │       │   │   │     case HASWELL: hsw_hw_cache_event_ids
+    │       │   │   │     ... (更多型号)
+    │       │   │   │
+    │       │   │   ├─ 初始化LBR (Last Branch Record)
+    │       │   │   │   intel_pmu_lbr_init_core()
+    │       │   │   │
+    │       │   │   ├─ 初始化PEBS (Precise Event-Based Sampling)
+    │       │   │   │   intel_ds_init()
+    │       │   │   │
+    │       │   │   └─ 设置回调函数
+    │       │   │       x86_pmu.enable = intel_pmu_enable
+    │       │   │       x86_pmu.disable = intel_pmu_disable
+    │       │   │       x86_pmu.add = intel_pmu_add
+    │       │   │       x86_pmu.del = intel_pmu_del
+    │       │   │       x86_pmu.read = intel_pmu_read
+    │       │   │       ...
+    │       │   │
+    │       │   └─ [AMD] amd_pmu_init()              [amd/core.c:1445]
+    │       │       │
+    │       │       ├─ 检查CPU版本 (>= K7)
+    │       │       │
+    │       │       ├─ amd_core_pmu_init()
+    │       │       │   读取CPUID并设置:
+    │       │       │   - num_counters
+    │       │       │   - cntval_bits
+    │       │       │   - version
+    │       │       │
+    │       │       ├─ 设置硬件缓存事件映射
+    │       │       │   memcpy(hw_cache_event_ids, amd_hw_cache_event_ids)
+    │       │       │
+    │       │       └─ 设置AMD特定回调函数
+    │       │           x86_pmu.enable = amd_pmu_enable
+    │       │           x86_pmu.disable = amd_pmu_disable
+    │       │           ...
+    │       │
+    │       ├─ 检查APIC存在性
+    │       │   pmu_check_apic()
+    │       │
+    │       ├─ 验证硬件存在
+    │       │   check_hw_exists(&pmu, num_counters, num_counters_fixed)
+    │       │
+    │       ├─ 初始化NMI处理
+    │       │   perf_events_lapic_init()
+    │       │   register_nmi_handler(NMI_LOCAL, perf_event_nmi_handler, 0, "PMI")
+    │       │
+    │       ├─ 设置静态调用 (优化性能)
+    │       │   x86_pmu_static_call_update()
+    │       │   ├─ static_call_update(x86_pmu_handle_irq, x86_pmu.handle_irq)
+    │       │   ├─ static_call_update(x86_pmu_enable, x86_pmu.enable)
+    │       │   ├─ static_call_update(x86_pmu_disable, x86_pmu.disable)
+    │       │   ├─ static_call_update(x86_pmu_add, x86_pmu.add)
+    │       │   └─ ... (更多回调)
+    │       │
+    │       ├─ 注册CPU热插拔回调
+    │       │   cpuhp_setup_state(CPUHP_PERF_X86_PREPARE, x86_pmu_prepare_cpu)
+    │       │   cpuhp_setup_state(CPUHP_AP_PERF_X86_STARTING, x86_pmu_starting_cpu)
+    │       │   cpuhp_setup_state(CPUHP_AP_PERF_X86_ONLINE, x86_pmu_online_cpu)
+    │       │
+    │       └─ 注册PMU到perf子系统
+    │           perf_pmu_register(&pmu, "cpu", PERF_TYPE_RAW)      [core.c:2156]
+    │           │   # 这是核心的PMU注册调用
+    │           │
+    │           └─ (见下文perf_pmu_register详细流程)
+    │
+    └─ perf_event_init()                         [kernel/events/core.c:13673]
+        │   # perf子系统通用初始化
+        │
+        ├─ 初始化IDR (ID分配器)
+        │   idr_init(&pmu_idr)
+        │
+        ├─ 初始化每CPU数据结构
+        │   perf_event_init_all_cpus()             [core.c:13548]
+        │   │
+        │   └─ for_each_possible_cpu(cpu):
+        │       ├─ 初始化软件事件哈希表
+        │       │   mutex_init(&swevent_htable.hlist_mutex)
+        │       │
+        │       ├─ 初始化PMU事件列表
+        │       │   INIT_LIST_HEAD(&pmu_sb_events.list)
+        │       │
+        │       └─ 初始化CPU上下文
+        │           cpuctx = per_cpu_ptr(&perf_cpu_context, cpu)
+        │           __perf_event_init_context(&cpuctx->ctx)
+        │               ├─ INIT_LIST_HEAD(&ctx->event_list)
+        │               ├─ INIT_LIST_HEAD(&ctx->pinned_active)
+        │               ├─ INIT_LIST_HEAD(&ctx->flexible_active)
+        │               └─ mutex_init(&ctx->mutex)
+        │
+        ├─ 初始化SRCU
+        │   init_srcu_struct(&pmus_srcu)
+        │
+        ├─ 注册基础软件PMU
+        │   perf_pmu_register(&perf_swevent, "software", PERF_TYPE_SOFTWARE)
+        │   perf_pmu_register(&perf_cpu_clock, "cpu_clock", -1)
+        │   perf_pmu_register(&perf_task_clock, "task_clock", -1)
+        │   perf_tp_register()
+        │
+        ├─ 初始化硬件断点
+        │   init_hw_breakpoint()
+        │
+        └─ 创建perf_event缓存
+            perf_event_cache = KMEM_CACHE(perf_event, SLAB_PANIC)
+```
+
+在上述的初始化过程中中分为两个阶段
+
+1. 早期硬件PMU初始化 (early_initcall)
+init_hw_perf_events() 是x86架构PMU的核心初始化入口，通过 early_initcall 在内核启动早期执行：
+
+    * 厂商检测与初始化：根据CPU供应商(Intel/AMD/Hygon/Zhaoxin)调用对应的初始化函数。Intel通过intel_pmu_init()读取CPUID leaf 0xA获取PMU版本、计数器数量、位宽等硬件能力；AMD通过amd_pmu_init()初始化AMD特定PMU结构。
+
+    * 硬件验证：调用check_hw_exists()验证PMU硬件是否真实存在，防止虚拟化环境中的误导。
+
+    * 中断处理注册：通过perf_events_lapic_init()配置本地APIC，并使用register_nmi_handler()注册PMI(性能监控中断)处理器。
+
+    * 静态调用优化：x86_pmu_static_call_update()将PMU回调函数注册为静态调用，避免间接调用开销。
+
+    * CPU热插拔支持：注册三个热插拔回调，分别在CPU准备、启动和上线时执行PMU相关初始化。
+
+    PMU注册：最后调用perf_pmu_register()将硬件PMU注册到perf子系统。
+
+2. perf子系统通用初始化 (perf_event_init)
+    * perf_event_init() 完成perf事件子系统的基础设施：
+
+    * 数据结构初始化：初始化PMU ID分配器(idr_init)和SRCU机制。
+
+    * 每CPU上下文初始化：perf_event_init_all_cpus()为每个CPU分配perf_cpu_context结构，包含软件事件哈希表、PMU事件列表和事件上下文。
+
+    * 软件PMU注册：注册软件事件PMU(perf_swevent)、CPU时钟PMU(perf_cpu_clock)和任务时钟PMU(perf_task_clock)，这些不依赖硬件。
+
+    * Tracepoint支持：通过perf_tp_register()注册ftrace tracepoint PMU。
+
+#### IDR的作用
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│                   perf子系统ID管理机制                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  1. pmu_idr (全局IDR)                                           │
+│     ┌────────────┬──────────────┬─────────────────────────┐     │
+│     │   ID       │    指针      │        含义             │     │
+│     ├────────────┼──────────────┼─────────────────────────┤     │
+│     │    0       │ perf_swevent │ 软件事件PMU类型         │     │
+│     │    1       │ perf_cpu_clk │ CPU时钟PMU类型          │     │
+│     │    3       │ &x86_pmu     │ 硬件CPU PMU类型         │     │
+│     │    4       │ intel_pt     │ Intel PT PMU类型        │     │
+│     └────────────┴──────────────┴─────────────────────────┘     │
+│                                                                  │
+│     使用场景：perf_event_open(attr.type=3) → 找到x86_pmu        │
+│                                                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  2. event->id (原子64位计数器)                                   │
+│                                                                  │
+│     static atomic64_t perf_event_id;                            │
+│                                                                  │
+│     perf_event #1: id = 1                                       │
+│     perf_event #2: id = 2                                       │
+│     perf_event #3: id = 3                                       │
+│     ...                                                         │
+│                                                                  │
+│     使用场景：                                                  │
+│     - 用户read(fd) 返回event->id                                │
+│     - mmap Ring Buffer时建立映射                                │
+│     - 作为事件在数据流中的唯一标识                              │
+│                                                                  │
+│     查找方式：不通过IDR查找！                                   │
+│     - 事件创建时保存到event->id                                 │
+│     - 通过文件描述符表fd → file → perf_event                   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+这里的IDR本质上是Xarray的包装
+
+```c
+IDR内部使用基数树(Radix Tree)存储 ID → Pointer 的映射：
+
+                          xa_head
+                            │
+                            ▼
+┌─────────────────────────────────────────────────┐
+│           内部节点 (Internal Node)               │
+│  ┌───┬───┬───┬───┬───┬───┬───┬───┐             │
+│  │ 0 │ 1 │ 2 │ 3 │...│62 │63 │   │  64个槽位   │
+│  └─┬─┴─┬─┴─┬─┴───┴───┴───┴───┴───┘             │
+│    │   │   │                                    │
+│    ▼   ▼   ▼                                    │
+│  ┌────┐┌────┐┌────┐                            │
+│  │PMU0││PMU1││PMU2│  ← 存储的实际指针           │
+│  └────┘└────┘└────┘                            │
+└─────────────────────────────────────────────────┘
+
+ID = 索引位置
+Pointer = 存储在槽位中的数据
+```
+
+当用户调用perf_event_open()指定type时，内核通过这个IDR找到对应的PMU。
+
+### perf_pmu_register() 详细流程
+
+```text
+perf_pmu_register(pmu, name, type)               [kernel/events/core.c:11447]
+    │
+    ├─ 分配per-CPU禁用计数
+    │   pmu->pmu_disable_count = alloc_percpu(int)
+    │
+    ├─ 分配PMU类型ID
+    │   idr_alloc(&pmu_idr, pmu, max, 0, GFP_KERNEL)
+    │   pmu->type = ret
+    │
+    ├─ 分配sysfs设备 (如果总线已运行)
+    │   if (pmu_bus_running):
+    │       pmu_dev_alloc(pmu)
+    │       # 在/sys/devices/下创建PMU设备目录
+    │
+    ├─ 分配per-CPU PMU上下文
+    │   pmu->cpu_pmu_context = alloc_percpu(struct perf_cpu_pmu_context)
+    │
+    ├─ 初始化每个CPU的PMU上下文
+    │   for_each_possible_cpu(cpu):
+    │       cpc = per_cpu_ptr(pmu->cpu_pmu_context, cpu)
+    │       __perf_init_event_pmu_context(&cpc->epc, pmu)   [core.c:4685]
+    │       │   ├─ epc->pmu = pmu
+    │       │   ├─ INIT_LIST_HEAD(&epc->pmu_ctx_entry)
+    │       │   ├─ INIT_LIST_HEAD(&epc->pinned_active)
+    │       │   ├─ INIT_LIST_HEAD(&epc->flexible_active)
+    │       │   └─ atomic_set(&epc->refcount, 1)
+    │       │
+    │       └─ __perf_mux_hrtimer_init(cpc, cpu)
+    │           # 初始化多路复用高精度定时器
+    │           # 用于多个事件共享硬件计数器时的调度
+    │
+    ├─ 设置事务回调 (如果未设置)
+    │   if (!pmu->start_txn):
+    │       if (pmu->pmu_enable):
+    │           pmu->start_txn = perf_pmu_start_txn
+    │           pmu->commit_txn = perf_pmu_commit_txn
+    │           pmu->cancel_txn = perf_pmu_cancel_txn
+    │       else:
+    │           pmu->start_txn = perf_pmu_nop_txn
+    │
+    ├─ 设置默认回调 (如果未设置)
+    │   if (!pmu->pmu_enable):
+    │       pmu->pmu_enable = perf_pmu_nop_void
+    │       pmu->pmu_disable = perf_pmu_nop_void
+    │   if (!pmu->check_period):
+    │       pmu->check_period = perf_event_nop_int
+    │   if (!pmu->event_idx):
+    │       pmu->event_idx = perf_event_idx_default
+    │
+    └─ 添加到PMU列表
+        list_add_rcu(&pmu->entry, &pmus)
+        atomic_set(&pmu->exclusive_cnt, 0)
+```
+
+这是所有PMU(硬件和软件)注册到perf子系统的统一接口：
+
+资源分配：分配per-CPU禁用计数和PMU上下文结构。
+
+ID分配：通过IDR机制分配唯一的PMU类型ID。
+
+sysfs集成：创建/sys/devices/<pmu_name>目录和属性文件，用户可通过sysfs查询PMU能力。
+
+上下文初始化：为每个CPU初始化PMU上下文，包括pinned/flexible事件列表和引用计数。
+
+多路复用定时器：__perf_mux_hrtimer_init()初始化高精度定时器，当事件数超过硬件计数器时，用于时间片轮转调度。
+
+回调函数填充：设置默认的事务、使能/禁用、周期检查等回调函数。
+
+全局注册：将PMU添加到全局pmus链表，后续事件创建时通过perf_init_event()遍历此链表找到合适的PMU。
+
+整个初始化流程确保了PMU子系统从硬件探测到软件抽象的完整建立，为后续perf事件的创建和管理提供了基础设施。
+
+## perf_event 事件的关键调用流程
+
 
 ### 创建一个 perf_event 事件
 
@@ -792,6 +1102,26 @@ perf_event_open(attr, pid, cpu, group_fd, flags)
 ```
 
 这里会为每个进程创建一个自己专属的 perf_event 上下文，在进程上下文进行切换时，perf_event 上下文也会进行切换，这样会防止两个进程的统计内容互相干扰。
+
+除了 perf_event_open 之外，perf_event_create_kernel_counter 也是一个perf_event事件创建的接口。
+
+```mermaid
+flowchart TB
+    A["用户态程序<br/>perf / profiler"] --> B["perf_event_open() syscall"]
+    B --> C["内核 perf core"]
+    C --> D["struct perf_event"]
+
+    E["内核子系统<br/>KVM / watchdog / trace 等"] --> F["perf_event_create_kernel_counter()"]
+    F --> C
+    C --> G["struct perf_event"]
+
+```
+
+二者的区别主要在于调用方和返回值不同。
+
+perf_event_open() = 用户态通过 syscall 创建 perf_event，返回 fd。一般由perf stat、perf record、用户态 profiler 这样的用户态程序调用。
+
+perf_event_create_kernel_counter() = 内核代码直接创建 perf_event，返回 struct perf_event *。一般由KVM、NMI watchdog、内核 tracing/监控子系统 这些内核当中的子系统进行调用。
 
 ### 事件采样流程
 
