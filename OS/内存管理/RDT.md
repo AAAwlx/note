@@ -2,6 +2,8 @@
 
 Intel RDT 是 Intel 提供的一套 CPU 资源管理技术，用于对多核系统中共享的微架构资源进行监控、隔离和分配。
 
+![alt text](../image/RDT/b20ce6726c59305936c1c0df805c4105.png)
+
 ## RDT技术的作用
 
 在云计算、虚拟化和容器场景中，多个任务运行在同一台物理机上，会共享 CPU、内存、LLC、内存控制器和 I/O 等资源。如果一个任务大量消耗某种共享资源，就可能导致其他任务延迟升高、吞吐量下降，这种现象称为 **Noisy Neighbor（吵闹邻居）**。
@@ -88,7 +90,7 @@ CPU 先根据 Set Index 找到 `Set 4441`，再把 Tag `0x123` 与该 set 中 8 
 * Tag 匹配表示 Cache hit，CPU 根据 Line Offset 读取 Cache line 中偏移 56 的数据；
 * Tag 都不匹配表示 Cache miss，CPU 从下一级存储加载 `0x12345640～0x1234567f` 这条 64 Bytes Cache line，再放入 Set 4441 的某个可用 way。
 
-一个 CLOS way 对应了一个 Cache line
+在一个 Set 中，一个 Way 位置对应一个 Cache Line
 
 ```text
 Set 数量 = 8 MB /（8 ways × 64 Bytes）= 16384
@@ -113,10 +115,10 @@ Task C ─┐
 Task D ─┘
 ```
 
-RMID 和 CLOSID 相互独立。同一个 CLOS 中的任务使用相同的资源控制策略，但仍然可以使用不同 RMID 分开监控。例如，Task A 和 Task B 都使用 `CLOSID=2`，同时分别使用 `RMID=10` 和 `RMID=11`：
+RMID 和 CLOSID 相互独立。同一个 CLOS 中的任务使用相同的资源控制策略，但仍然可以使用不同 RMID 分开监控。例如，Task A 和 Task B 都使用 CLOSID=2，同时分别使用 RMID=10 和 RMID=11：
 
 ```text
-A：CLOSID=1，RMID=10
+A：CLOSID=2，RMID=10
 B：CLOSID=2，RMID=11
 ```
 
@@ -231,9 +233,9 @@ MBM 可以用来发现大量占用内存带宽的 Noisy Neighbor，也可以配�
 
 #### CAT
 
-CAT 是 Intel RDT 中用于控制共享 Cache 容量的功能，它通过限制不同任务在 Cache miss 后可以向哪些 Cache way 分配新的 Cache line，减少任务之间的缓存驱逐和 Cache 污染，从而保护延迟敏感任务并提高性能稳定性。
+CAT 是 Intel RDT 中用于控制共享 Cache 容量的功能，CAT 在 Cache Line 的分配、填充和替换过程中，根据 CLOS 对应的 CBM 限制可选 Way。并通过这种方法，减少任务之间的缓存驱逐和 Cache 污染，从而保护延迟敏感任务并提高性能稳定性。
 
-这里 CAT 控制的是 Cache line 的分配位置，而不是内存访问权限，因此属于性能隔离机制。
+这里 CAT 控制的是某个任务对应的 CLOS 下 Cache line 的分配位置，而不是内存访问权限，因此属于性能隔离机制。
 
 CAT 为每个 CLOS 配置一个 CBM，CBM 中的每一位对应一个 Cache way。例如，一个 16-way LLC 可以配置为：
 
@@ -366,7 +368,7 @@ CLOS n 的 Data mask → IA32_L3_QOS_MASK_(2n)
 CLOS n 的 Code mask → IA32_L3_QOS_MASK_(2n+1)
 ```
 
-原来的 mask 0～3 在开启 CDP 后，会分别变成 CLOS 0.Data、CLOS 0.Code、CLOS 1.Data 和 CLOS 1.Code。因此，每个 CLOS 获得了独立的代码和数据控制能力，但可用 CLOS 数量也会减少一半。
+原来的 mask 0～3 在开启 CDP 后，会分别变成 CLOS 0.Data、CLOS 0.Code、CLOS 1.Data 和 CLOS 1.Code。因此，每个 CLOS 获得了独立的代码和数据控制能力，但软件可使用的逻辑 CLOS 数量通常会减少，这里需要通过 CPUID 枚举获取到具体数量。
 
 下图以 8-way L3 Cache 为例，展示了 CDP 的寄存器索引方式以及硬件在 Instruction Fetch 和 Data Load/Store 时如何选择不同的 mask。
 
@@ -419,7 +421,6 @@ IA32_PQR_ASSOC.CLOSID = 1
         ↓
 降低该任务占用的内存带宽
 ```
-
 
 ## 寄存器的映射地址
 
