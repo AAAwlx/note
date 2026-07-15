@@ -406,7 +406,7 @@ CLOS 2 → IA32_MBA_THRTL_2（0xD52）→ delay = 80  // 示例：更强节流
 #define MSR_IA32_MBA_THRTL_BASE		0xd50
 ```
 
-#### 运行时生效过程
+运行时生效过程：
 
 任务被调度到逻辑 CPU 上时，内核会把任务的 CLOSID 写入 `IA32_PQR_ASSOC`。硬件随后根据 CLOSID 选择对应的 `IA32_MBA_THRTL_n`，并在任务产生内存请求时应用其中的 delay 值：
 
@@ -421,6 +421,8 @@ IA32_PQR_ASSOC.CLOSID = 1
         ↓
 降低该任务占用的内存带宽
 ```
+
+![alt text](../image/RDT/image-9.png)
 
 ## 寄存器的映射地址
 
