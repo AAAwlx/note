@@ -48,7 +48,7 @@ cgroup 可以在一定程度上解决 Noisy Neighbor 问题。它能够统计并
 
 CLOS 表示一类资源分配单位，硬件通过 CLOSID 来识别识别。CAT、CDP 和 MBA 都可以使用 CLOSID 选择对应的 Cache way 掩码或内存带宽策略。下面以 CAT 为例说明 CLOS 如何控制 LLC。
 
-#### 任务与 CLOS 的关系
+#### CLOS way 与 set 和 Cache line
 
 同一时刻，一个任务只能关联一个 CLOS，但多个任务可以共享同一个 CLOS：
 
@@ -436,3 +436,77 @@ IA32_PQR_ASSOC.CLOSID = 1
 #define MSR_IA32_L2_CBM_BASE		0xd10
 #define MSR_IA32_MBA_THRTL_BASE		0xd50
 ```
+
+## L2 为什么也可以使用 RDT
+
+L2 Cache 通常被称为 **private L2**，这里的 private 是指它属于一个物理 Core，不与其他物理 Core 共享，并不表示它只会被一个任务使用。
+
+在典型支持 Hyper-Threading/SMT 的处理器中，一个物理 Core 可以包含两个逻辑 CPU。两个逻辑 CPU 拥有各自的部分架构状态，但会共享该 Core 内的大量微架构资源，其中通常包括 L1/L2 Cache、执行单元以及通往 LLC 的接口：
+
+```text
+Physical Core 0
+├── Logical CPU 0
+├── Logical CPU 1
+└── Shared private L2
+
+Physical Core 1
+├── Logical CPU 2
+├── Logical CPU 3
+└── Shared private L2
+```
+
+因此，private L2 只是“不跨物理 Core 共享”，并不等于“没有资源竞争”。L2 CAT 的作用，就是控制不同 CLOS 的任务可以向 L2 的哪些 Cache way 分配新的 Cache line。
+
+### SMT 线程之间的 L2 竞争
+
+假设同一个物理 Core 的两个逻辑 CPU 分别运行高优先级任务和后台任务：
+
+```text
+Logical CPU 0 → 高优先级任务 A
+Logical CPU 1 → 后台任务 B
+                     │
+                     └── 共享同一个 L2
+```
+
+如果任务 B 不断扫描大量数据，它可能持续向 L2 填充新的 Cache line，并驱逐任务 A 的热点数据。虽然两个任务运行在不同的逻辑 CPU 上，但它们仍然会竞争：
+
+* L1/L2 Cache 容量；
+* Cache tag 和 data array 的访问端口；
+* load/store 单元；
+* miss handling 资源；
+* 执行单元和内存请求队列。
+
+L2 CAT 可以为两个任务配置不同的 L2 way mask。例如，一个 8-way L2 可以配置为：
+
+```text
+Logical CPU 0 → Task A → CLOS 1 → L2 mask = 11110000
+Logical CPU 1 → Task B → CLOS 2 → L2 mask = 00001111
+
+共享 L2：
+way 0～3 → Task B 可以分配
+way 4～7 → Task A 可以分配
+```
+
+当任务 A、B 发生 L2 Cache miss 时，新加载的 Cache line 只能进入各自 mask 允许的 way，从而减少两个 SMT 线程之间的缓存驱逐和污染。
+
+### 关闭 SMT 后仍然存在任务切换干扰
+
+即使关闭 SMT，一个物理 Core 同一时刻只执行一个线程，L2 CAT 仍然有意义。因为操作系统会在这个 Core 上切换不同任务：
+
+```text
+t0：Task A 运行，在 L2 中留下热点数据
+t1：切换到 Task B，Task B 大量填充 L2
+t2：再次切回 Task A，原有热点数据可能已经被驱逐
+```
+
+此时不存在两个线程同时竞争 L2，但后运行的任务仍然可能污染先前任务留下的缓存内容。通过限制低优先级任务可分配的 L2 way，可以减少任务切换产生的 Cache 污染，提高热点数据的复用率以及实时任务执行时间的稳定性。
+
+需要注意，CAT 的限制跟随任务的 CLOS，而不是永久把某些 L2 way 划给某个任务。任务 A 被调度时使用 A 对应的 mask，任务 B 被调度时则使用 B 对应的 mask。
+
+### L2 CAT 的能力边界
+
+L2 CAT 控制的是 Cache miss 后新 Cache line 的分配和替换范围，提供的是 **Cache 容量隔离**，不能实现整个物理 Core 的完全隔离。
+
+即使两个 SMT 线程使用互不重叠的 L2 way，它们仍然会共享 L2 访问带宽、Cache 端口、执行流水线和 miss handling 等资源。因此，L2 CAT 可以缓解由 Cache 容量竞争造成的性能干扰，但无法消除同一物理 Core 内的所有资源竞争。
+
+总结来说，一个 private L2 仍然可能被同一物理 Core 上的多个 SMT 线程同时使用，也可能被不同时间片中的任务先后使用。L2 CAT/CDP 正是通过限制不同 CLOS 向 L2 分配 Cache line 的范围，降低 SMT 干扰和任务切换造成的 Cache 污染，从而提高任务的 QoS 和执行确定性。
