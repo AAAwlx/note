@@ -510,3 +510,146 @@ L2 CAT 控制的是 Cache miss 后新 Cache line 的分配和替换范围，提�
 即使两个 SMT 线程使用互不重叠的 L2 way，它们仍然会共享 L2 访问带宽、Cache 端口、执行流水线和 miss handling 等资源。因此，L2 CAT 可以缓解由 Cache 容量竞争造成的性能干扰，但无法消除同一物理 Core 内的所有资源竞争。
 
 总结来说，一个 private L2 仍然可能被同一物理 Core 上的多个 SMT 线程同时使用，也可能被不同时间片中的任务先后使用。L2 CAT/CDP 正是通过限制不同 CLOS 向 L2 分配 Cache line 的范围，降低 SMT 干扰和任务切换造成的 Cache 污染，从而提高任务的 QoS 和执行确定性。
+
+## 硬件寄存器对应的粒度
+
+Intel RDT（Resource Director Technology）和 AMD PQoS（Platform Quality of Service）虽然寄存器名称略有不同，但两者的硬件组织方式基本一致：RDT 寄存器并不都是同一种粒度，而是可以分为”运行时关联寄存器（Per Logical Processor）“和”资源配置寄存器（Per Resource Domain）“两大类。  
+
+### Per Logical Processor
+
+第一类寄存器属于当前 Logical Processor 这里指逻辑处理器，即 Hardware Thread / SMT Thread。
+
+这类寄存器保存在每个 Logical Processor 自己的 MSR（Model Specific Register）Bank 中，随着线程上下文切换而更新，因此每个 SMT Thread 都拥有独立的一份。
+
+典型寄存器包括：
+
+|寄存器	|作用	|硬件粒度|
+|---|---|---|
+|IA32_PQR_ASSOC	|保存当前线程的 CLOSID 与 RMID	|Per Logical Processor|
+|IA32_QM_EVTSEL	|指定当前线程读取哪个 Monitoring Event	|Per Logical Processor|
+|IA32_QM_CTR	|返回当前线程读取到的 Monitoring Counter 值|	Per Logical Processor|
+
+硬件组织关系如下：
+
+```text
+Socket
+┌──────────────────────────────┐
+          Physical Core
+      ┌─────────────────────┐
+      │ Logical CPU 0       │
+      │                     │
+      │ MSR Bank            │
+      │  ├─ IA32_TSC        │
+      │  ├─ IA32_PAT        │
+      │  ├─ IA32_MISC       │
+      │  └─ IA32_PQR_ASSOC  │
+      └─────────────────────┘
+      ┌─────────────────────┐
+      │ Logical CPU 1       │
+      │                     │
+      │ MSR Bank            │
+      │  └─ IA32_PQR_ASSOC  │
+      └─────────────────────┘
+```
+
+Intel SDM 明确指出：
+
+Each logical processor contains an instance of the IA32_PQR_ASSOC register. 操作系统或 VMM 会在线程上下文切换（Context Switch）时更新该寄存器，以指定当前执行线程所属的 Class of Service（COS/CLOS）和 RMID。 
+
+因此，Linux 在 schedule() 过程中，会针对当前 Logical CPU执行一次：
+
+schedule()
+      ↓
+resctrl_sched_in()
+      ↓
+wrmsr(IA32_PQR_ASSOC)
+
+从而保证当前运行线程始终关联到正确的 CLOSID 和 RMID。
+
+### Per Resource Domain（每个资源域一套）
+
+第二类寄存器并不属于某一个 CPU，而是属于共享资源（Resource Domain）。
+
+例如：
+
+* 一个 LLC（L3 Cache）对应一套 CAT Mask；
+* 一个 L2 Cache 对应一套 L2 CAT Mask；
+* 一个 Memory Bandwidth Domain 对应一套 MBA 配置。
+
+典型寄存器包括：
+
+寄存器	控制对象	硬件粒度
+IA32_L3_QOS_MASK_n	L3 CAT Cache Way Mask	Per L3 Resource Domain
+IA32_L2_QOS_MASK_n	L2 CAT Cache Way Mask	Per L2 Resource Domain
+IA32_MBA_THRTL_n	MBA Memory Bandwidth Limit	Per MBA Resource Domain
+
+例如一个双路服务器：
+
+Socket0
+           LLC Domain0
+        ┌───────────────┐
+        │ IA32_L3_QOS_MASK_0 │
+        │ IA32_L3_QOS_MASK_1 │
+        │        ...         │
+        └───────────────┘
+              │
+    ┌─────────┴─────────┐
+    │                   │
+  Core0               Core1
+CPU0 CPU1          CPU2 CPU3
+
+这里：
+
+* 所有共享同一个 LLC 的 Logical CPU；
+* 都会使用同一套 IA32_L3_QOS_MASK_n。
+
+Intel 官方开发者文档也指出：
+
+Each hardware thread is assigned a CLOS (through IA32_PQR_ASSOC)，而每个 CLOS 再映射到一组 IA32_L3_QOS_MASK_n（或 IA32_L2_QOS_MASK_n）寄存器，用于描述对应的 Cache Bit Mask。  
+
+因此：
+
+* IA32_PQR_ASSOC 决定当前线程属于哪个 CLOS；
+* IA32_L3_QOS_MASK_n 定义该 CLOS 能够使用哪些 Cache Way。
+
+### 两类寄存器之间的关系
+
+CPU 在访问共享缓存时，并不是直接读取 Cache Mask，而是按照如下流程工作：
+
+```text
+                Current Logical CPU
+                        │
+                        ▼
+                IA32_PQR_ASSOC
+              (CLOSID = 2)
+                        │
+                        ▼
+         Locate Resource Domain (LLC)
+                        │
+                        ▼
+         IA32_L3_QOS_MASK_2
+          CBM = 11110000
+                        │
+                        ▼
+         Hardware CAT Logic
+                        │
+                        ▼
+      Only allocate Cache Line
+      into allowed Cache Ways
+```
+
+因此：
+
+* IA32_PQR_ASSOC 是”当前线程的资源身份（Identity）”；
+* IA32_L3_QOS_MASK_n 是”资源控制策略（Policy）”；
+* CPU 每次发生 Cache Fill 时，会先读取当前 Logical Processor 的 IA32_PQR_ASSOC，得到 CLOSID，再查找当前 Resource Domain 中对应的 IA32_L3_QOS_MASK_n，最终决定允许分配到哪些 Cache Way。 
+
+
+RDT 的寄存器体系可以概括为两层：
+
+|类型	|代表寄存器	|硬件组织粒度	|作用|
+|-------|-------------|-------------|---|
+|运行态关联寄存器（Runtime State）	|IA32_PQR_ASSOC、IA32_QM_EVTSEL、IA32_QM_CTR	|Per Logical Processor（每个 Hardware Thread）	|保存当前线程的 CLOSID、RMID 以及监控事件|
+|资源策略寄存器（Policy Table）	|IA32_L3_QOS_MASK_n、IA32_L2_QOS_MASK_n、IA32_MBA_THRTL_n	|Per Resource Domain（每个 LLC/L2/MBA Domain）	|保存各个 CLOS 对应的资源控制策略|
+
+这种设计使得线程调度与资源管理相互解耦：操作系统只需要在上下文切换时修改 IA32_PQR_ASSOC，而无需频繁修改共享资源的配置寄存器；硬件则通过当前线程的 CLOSID 自动索引到对应 Resource Domain 的配置表，实现高效的缓存分配与带宽控制。
