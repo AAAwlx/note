@@ -13,7 +13,7 @@ perf_event 采用**统一接口抽象设计**，核心思想是通过 `struct pm
 
 ### 架构图
 
-![alt text](../image/perf_event框架/image.png)
+![alt text](../../image/perf_event框架/image.png)
 
 从图中可以看到在用户态可以使用 perf 程序，通过 ring buffer 与内核的perf_event进行交互，这里的 perf_event 就是刚才所说的对于底层事件不同性能监控来源的一种高层屏蔽。
 
@@ -509,8 +509,7 @@ perf stat -e cpu-clock,cycles,sched:sched_switch ./app
 
 ### 数据之间的关系
 
-![alt text](../image/perf_event框架/image-1.png)
-
+![alt text](../../image/perf_event框架/image-1.png)
 
 |关系|说明|
 |---|---|
@@ -518,6 +517,8 @@ perf stat -e cpu-clock,cycles,sched:sched_switch ./app
 |pmu_context → event [1:n]	|一个 pmu_context 包含多个 event|
 |event → pmu [n:1]	|多个 event 可以关联同一个 pmu|
 |context → event [1:n]	|一个 context 管理多个 event|
+
+这里举个例子，一个进程首先会关联自己的perf上下文结构即 perf_event_context ，在一个进程中又可以同时创建 cycles、instructions 和 IMC memory reads 三个 perf_event。这三个事件都属于该进程的 perf_event_context，但其中 cycles 和 instructions 都由 CPU Core PMU 负责，因此共享同一个 perf_event_pmu_context；而 IMC memory reads 属于 Uncore IMC PMU，因此会对应另一个 perf_event_pmu_context。因此，perf_event_context 用于按进程组织性能事件，而 perf_event_pmu_context 则进一步按照事件所属的 PMU 对这些事件进行分组。
 
 ## PMU 类型
 
