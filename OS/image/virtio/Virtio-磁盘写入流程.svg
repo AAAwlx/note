@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 1050" width="1100" height="1050">
+  <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+    .title { font-size: 24px; font-weight: 600; fill: #111827; }
+    .subtitle { font-size: 14px; fill: #6b7280; }
+    .layer { font-size: 15px; font-weight: 600; fill: #374151; }
+    .node-title { font-size: 16px; font-weight: 600; fill: #111827; }
+    .node-sub { font-size: 13px; fill: #6b7280; }
+    .edge-label { font-size: 13px; fill: #374151; }
+    .step { font-size: 13px; font-weight: 600; fill: #ffffff; }
+    .note-title { font-size: 14px; font-weight: 600; fill: #166534; }
+    .note { font-size: 12px; fill: #166534; }
+  </style>
+  <defs>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#2563eb"/></marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#16a34a"/></marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#ea580c"/></marker>
+    <marker id="arrow-purple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#9333ea"/></marker>
+  </defs>
+
+  <rect width="1100" height="1050" fill="#ffffff"/>
+  <text x="50" y="44" class="title">Virtio：一次磁盘写入如何完成</text>
+  <text x="50" y="72" class="subtitle">Guest 与 Host 通过共享 Virtqueue 传递请求，避免模拟完整的 IDE/SATA/SCSI 控制器</text>
+
+  <rect x="50" y="105" width="1000" height="315" rx="14" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5" data-graph-role="container" data-container-id="guest"/>
+  <text x="75" y="136" class="layer">Guest 虚拟机</text>
+  <rect x="50" y="450" width="1000" height="145" rx="14" fill="#faf5ff" stroke="#ddd6fe" stroke-width="1.5" data-graph-role="container" data-container-id="shared"/>
+  <text x="75" y="481" class="layer">Guest 与 Host 共享内存</text>
+  <rect x="50" y="625" width="1000" height="230" rx="14" fill="#f0fdf4" stroke="#bbf7d0" stroke-width="1.5" data-graph-role="container" data-container-id="host"/>
+  <text x="75" y="656" class="layer">宿主机 / VMM</text>
+  <rect x="50" y="885" width="1000" height="85" rx="14" fill="#f3f4f6" stroke="#d1d5db" stroke-width="1.5" data-graph-role="container" data-container-id="hardware"/>
+  <text x="75" y="916" class="layer">物理硬件</text>
+
+  <!-- Request path arrows -->
+  <path d="M550 212 V245" stroke="#2563eb" stroke-width="2.5" fill="none" marker-end="url(#arrow-blue)" data-graph-role="edge"/>
+  <path d="M550 317 V350" stroke="#2563eb" stroke-width="2.5" fill="none" marker-end="url(#arrow-blue)" data-graph-role="edge"/>
+  <path d="M550 422 V495" stroke="#2563eb" stroke-width="2.5" fill="none" marker-end="url(#arrow-blue)" data-graph-role="edge"/>
+  <path d="M550 567 V680" stroke="#ea580c" stroke-width="2.5" fill="none" marker-end="url(#arrow-orange)" data-graph-role="edge"/>
+  <path d="M550 752 V775" stroke="#2563eb" stroke-width="2.5" fill="none" marker-end="url(#arrow-blue)" data-graph-role="edge"/>
+  <path d="M550 847 V910" stroke="#2563eb" stroke-width="2.5" fill="none" marker-end="url(#arrow-blue)" data-graph-role="edge"/>
+
+  <!-- Completion path arrows -->
+  <path d="M730 934 H970 V726 H730" stroke="#16a34a" stroke-width="2.4" fill="none" marker-end="url(#arrow-green)" data-graph-role="edge"/>
+  <path d="M730 706 H880 V541 H730" stroke="#16a34a" stroke-width="2.4" fill="none" marker-end="url(#arrow-green)" data-graph-role="edge"/>
+  <path d="M730 521 H810 V396 H730" stroke="#9333ea" stroke-width="2.2" stroke-dasharray="7 5" fill="none" marker-end="url(#arrow-purple)" data-graph-role="edge"/>
+
+  <!-- Request path nodes -->
+  <g><rect x="370" y="140" width="360" height="72" rx="9" fill="#ffffff" stroke="#93c5fd" stroke-width="1.5"/><circle cx="400" cy="176" r="16" fill="#2563eb"/><text x="400" y="181" text-anchor="middle" class="step">1</text><text x="432" y="170" class="node-title">应用程序发起写入</text><text x="432" y="191" class="node-sub">write() / fsync()</text></g>
+  <g><rect x="370" y="245" width="360" height="72" rx="9" fill="#ffffff" stroke="#93c5fd" stroke-width="1.5"/><circle cx="400" cy="281" r="16" fill="#2563eb"/><text x="400" y="286" text-anchor="middle" class="step">2</text><text x="432" y="275" class="node-title">Guest 文件系统与块设备层</text><text x="432" y="296" class="node-sub">生成块设备写请求</text></g>
+  <g><rect x="370" y="350" width="360" height="72" rx="9" fill="#ffffff" stroke="#93c5fd" stroke-width="1.5"/><circle cx="400" cy="386" r="16" fill="#2563eb"/><text x="400" y="391" text-anchor="middle" class="step">3</text><text x="432" y="380" class="node-title">Virtio-blk 前端驱动</text><text x="432" y="401" class="node-sub">创建描述符并准备数据缓冲区</text></g>
+  <g><rect x="370" y="495" width="360" height="72" rx="9" fill="#ffffff" stroke="#c4b5fd" stroke-width="1.5"/><circle cx="400" cy="531" r="16" fill="#9333ea"/><text x="400" y="536" text-anchor="middle" class="step">4</text><text x="432" y="525" class="node-title">Virtqueue</text><text x="432" y="546" class="node-sub">Descriptor Table · Avail Ring · Used Ring</text></g>
+  <g><rect x="370" y="680" width="360" height="72" rx="9" fill="#ffffff" stroke="#86efac" stroke-width="1.5"/><circle cx="400" cy="716" r="16" fill="#ea580c"/><text x="400" y="721" text-anchor="middle" class="step">5</text><text x="432" y="710" class="node-title">Virtio 后端</text><text x="432" y="731" class="node-sub">vhost 内核后端或 QEMU 后端</text></g>
+  <g><rect x="370" y="775" width="360" height="72" rx="9" fill="#ffffff" stroke="#86efac" stroke-width="1.5"/><circle cx="400" cy="811" r="16" fill="#16a34a"/><text x="400" y="816" text-anchor="middle" class="step">6</text><text x="432" y="805" class="node-title">宿主机块设备层</text><text x="432" y="826" class="node-sub">文件、LVM 或宿主机块设备</text></g>
+  <g><rect x="370" y="910" width="360" height="48" rx="9" fill="#ffffff" stroke="#9ca3af" stroke-width="1.5"/><circle cx="400" cy="934" r="16" fill="#2563eb"/><text x="400" y="939" text-anchor="middle" class="step">7</text><text x="550" y="940" text-anchor="middle" class="node-title">物理磁盘 / SSD</text></g>
+
+  <!-- Labels and notes -->
+  <rect x="575" y="603" width="245" height="25" rx="5" fill="#ffffff"/>
+  <text x="586" y="621" class="edge-label">Kick / Notify（常由 eventfd 加速）</text>
+  <text x="745" y="925" class="edge-label">I/O 完成</text>
+  <text x="745" y="691" class="edge-label">写回 Used Ring</text>
+  <text x="744" y="504" class="edge-label">irqfd / 虚拟中断</text>
+
+  <rect x="75" y="687" width="240" height="118" rx="9" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="1.5"/>
+  <text x="95" y="716" class="note-title">优化点</text>
+  <text x="95" y="741" class="note">• 请求通过共享队列传递</text>
+  <text x="95" y="763" class="note">• 不模拟完整传统控制器</text>
+  <text x="95" y="785" class="note">• vhost 可绕过 QEMU 数据面</text>
+
+  <rect x="775" y="284" width="245" height="90" rx="9" fill="#fff7ed" stroke="#fed7aa" stroke-width="1.5"/>
+  <text x="795" y="314" class="node-title">需要注意</text>
+  <text x="795" y="338" class="node-sub">Virtio 并非绝对零 VM Exit；</text>
+  <text x="795" y="359" class="node-sub">通知与配置路径仍取决于实现。</text>
+
+  <!-- Legend -->
+  <line x1="75" y1="1015" x2="110" y2="1015" stroke="#2563eb" stroke-width="2.5" marker-end="url(#arrow-blue)"/><text x="120" y="1020" class="subtitle">磁盘写请求</text>
+  <line x1="285" y1="1015" x2="320" y2="1015" stroke="#ea580c" stroke-width="2.5" marker-end="url(#arrow-orange)"/><text x="330" y="1020" class="subtitle">后端通知</text>
+  <line x1="480" y1="1015" x2="515" y2="1015" stroke="#16a34a" stroke-width="2.4" marker-end="url(#arrow-green)"/><text x="525" y="1020" class="subtitle">完成回写</text>
+  <line x1="680" y1="1015" x2="715" y2="1015" stroke="#9333ea" stroke-width="2.2" stroke-dasharray="7 5" marker-end="url(#arrow-purple)"/><text x="725" y="1020" class="subtitle">虚拟中断</text>
+</svg>

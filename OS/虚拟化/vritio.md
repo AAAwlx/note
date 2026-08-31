@@ -6,32 +6,39 @@ Virtio 是一种虚拟化标准，用于提高虚拟化环境中I/O设备的性�
 ​后端驱动（Host Backend）​：宿主机中实现，处理前端驱动的请求（如 QEMU 模拟）。
 ​Virtio 环（Virtqueue）​：共享内存环形缓冲区，用于高效传输数据和控制信息。
 
-为什么需要 Virtio ？这里以网络收包为例举例说明。
+## 为什么需要 ​Virtio
 
-## 全虚拟化
+为什么需要 Virtio ？这里以访问磁盘为例举例说明。
 
-发送：
+### 全虚拟化
 
-1. Guest OS在准备好网络包数据以及描述符资源后，通过写TDT寄存器，触发VM的异常退出，由KVM模块接管；
-2. KVM模块返回到Qemu后，Qemu会检查VM退出的原因，比如检查到e1000寄存器访问出错，因而触发e1000前端工作；
-3. Qemu能访问Guest OS中的地址内容，因而e1000前端能获取到Guest OS内存中的网络包数据，发送给后端，后端再将网络包数据发送给TUN/TAP驱动，其中TUN/TAP为虚拟网络设备；
-4. 数据发送完成后，除了更新ring-buffer的指针及描述符状态信息外，KVM模块会模拟TX中断；
-5. 当再次进入VM时，Guest OS看到的是数据已经发送完毕，同时还需要进行中断处理；
-6. Guest OS跑在vCPU线程中，发送数据时相当于会打断它的执行，直到处理完后再恢复回来，也就是一个严格的同步处理过程；
+![alt text](../image/virtio/全虚拟化-磁盘写入流程.svg)
 
-这里的e1000前端相当于是
+磁盘写入：
 
-## 设备的半虚拟化
+1. Guest 应用通过 `write()` 写入文件，Guest 文件系统将请求转换为块设备请求；
+2. Guest OS 中的传统 IDE/SATA/SCSI 驱动准备好请求描述符，并通过访问虚拟磁盘控制器的寄存器通知设备；
+3. 由于这是对虚拟硬件寄存器的访问，CPU 触发 VM Exit，由 KVM 接管；
+4. KVM 将 VM Exit 原因返回给 QEMU，QEMU 识别出这是虚拟磁盘控制器的寄存器访问，并模拟 IDE/SATA/SCSI 控制器的行为；
+5. QEMU 读取 Guest 内存中的数据，将其转换为宿主机的文件或块设备 I/O 请求，并提交给宿主机存储层；
+6. 宿主机完成磁盘写入后，QEMU 更新虚拟控制器的状态和描述符，并通过虚拟中断通知 Guest；
+7. KVM 再次执行 VM Entry，Guest OS 恢复执行并在中断处理程序中确认写入完成；
 
-![alt text](../image/vritio.png)
+因此，一次普通的全虚拟化磁盘访问通常包含一次 Guest → VMM 的 VM Exit 和一次 VMM → Guest 的 VM Entry。这里的“前后端切换”不严格等同于操作系统进程之间的上下文切换。
 
-从图中的流程可以看出，原先虚拟机准备好数据之后需要先通过中断退出到宿主机的内核态，再由内核态的kvm向qemu返回虚拟机退出的原因，在由qemu找到虚拟机退出的原因，最后才能执行设备的前端驱动来模拟网卡。
+### 半虚拟化
 
-但是在引入了 vritio 之后，前端驱动在虚拟机的内核中实现。这样就能减少一次虚拟机到客户机的切换（中断上下文切换）
+![Virtio 磁盘写入流程](../image/virtio/Virtio-磁盘写入流程.svg)
 
-在 vritio 前端将数据准备好放入到 vritio_queue 后虚拟机通过kvm向qemu发送通知表示已将数据准备好。
+从图中的流程可以看出，在全虚拟化磁盘访问中，Guest 需要通过传统磁盘控制器寄存器提交请求。该访问会触发 VM Exit，KVM 再将退出原因交给 QEMU，由 QEMU 模拟磁盘控制器并执行宿主机 I/O，完成后再通过虚拟中断通知 Guest。
+
+引入 Virtio 后，Virtio 前端驱动直接运行在 Guest 内核中。Guest 将磁盘请求描述符和数据放入共享的 Virtqueue，而不是逐次访问复杂的 IDE/SATA 控制器寄存器。宿主机的 Virtio 后端读取 Virtqueue 中的请求并执行磁盘 I/O。
+
+在使用 `eventfd`、`irqfd`、`vhost` 等优化机制时，普通数据路径可以减少甚至绕过 QEMU 用户态参与，因而减少 Guest 与 VMM 之间的 VM Exit/VM Entry 切换。不过，Virtio 并不意味着任何实现下都绝对没有 VM Exit；通知后端、设备配置或未启用相关优化时，仍可能发生 VM Exit。
 
 https://blog.csdn.net/qq_41596356/article/details/128248214
+
+## ​Virtio 的核心机制
 
 Virtio Device、Virtio Driver、Virtqueue和Notification（eventfd/irqfd）是虚拟化环境中Virtio架构的关键组件，它们共同作用以实现高效的I/O虚拟化。以下是对这四个组件的详细解释：
 
